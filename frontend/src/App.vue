@@ -32,6 +32,7 @@ onMounted(() => {
     <nav class="nav">
       <RouterLink to="/dashboard">总览</RouterLink>
       <RouterLink to="/market">行情交易</RouterLink>
+      <RouterLink to="/bot">自动交易</RouterLink>
       <RouterLink to="/orders">订单记录</RouterLink>
     </nav>
     <div class="spacer" />

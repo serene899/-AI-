@@ -22,6 +22,12 @@ const router = createRouter({
       component: () => import('@/views/Orders.vue'),
       meta: { title: 'Orders' },
     },
+    {
+      path: '/bot',
+      name: 'bot',
+      component: () => import('@/views/Bot.vue'),
+      meta: { title: 'Bot' },
+    },
   ],
 })
 

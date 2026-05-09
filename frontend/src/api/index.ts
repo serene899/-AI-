@@ -93,6 +93,50 @@ export interface Trade {
   created_at: string
 }
 
+export interface StrategyField {
+  name: string
+  label: string
+  type: string
+  default: number
+  min?: number
+  max?: number
+}
+
+export interface StrategyDef {
+  key: string
+  name: string
+  description: string
+  fields: StrategyField[]
+}
+
+export interface BotLog {
+  ts: string
+  level: 'info' | 'trade' | 'error'
+  message: string
+}
+
+export interface Bot {
+  id: number
+  strategy: string
+  symbol: string
+  params: Record<string, any>
+  running: boolean
+  started_at: string
+  stopped_at: string | null
+  stats: {
+    trades: number
+    buys: number
+    sells: number
+    total_buy_qty: number
+    total_sell_qty: number
+    total_spent: number
+    total_received: number
+    last_price: number | null
+    reference_price: number | null
+  }
+  logs: BotLog[]
+}
+
 // -------- API --------
 export const api = {
   health: () => http.get('/health'),
@@ -124,6 +168,13 @@ export const api = {
     http.get<any, Order[]>('/api/v1/orders', { params: status ? { status } : {} }),
   cancelOrder: (id: number) => http.delete<any, Order>(`/api/v1/orders/${id}`),
   listTrades: () => http.get<any, Trade[]>('/api/v1/trades'),
+
+  // -------- Bot --------
+  listStrategies: () => http.get<any, StrategyDef[]>('/api/v1/bot/strategies'),
+  listBots: () => http.get<any, Bot[]>('/api/v1/bot'),
+  startBot: (strategy: string, symbol: string, params: Record<string, any>) =>
+    http.post<any, Bot>('/api/v1/bot/start', { strategy, symbol, params }),
+  stopBot: (id: number) => http.post<any, Bot>(`/api/v1/bot/stop/${id}`),
 }
 
 export default api
