@@ -42,18 +42,18 @@ async function submit() {
   <div>
     <el-radio-group v-model="side" style="margin-bottom:12px">
       <el-radio-button label="buy">
-        <span style="color:var(--up)">买入 BUY</span>
+        <span style="color:var(--up)">买入</span>
       </el-radio-button>
       <el-radio-button label="sell">
-        <span style="color:var(--down)">卖出 SELL</span>
+        <span style="color:var(--down)">卖出</span>
       </el-radio-button>
     </el-radio-group>
 
     <el-form label-position="top" size="default">
       <el-form-item label="订单类型">
         <el-select v-model="type" style="width:100%">
-          <el-option label="市价单 Market" value="market" />
-          <el-option label="限价单 Limit" value="limit" />
+          <el-option label="市价单（按当前价立即成交）" value="market" />
+          <el-option label="限价单（指定价格，自动等待成交）" value="limit" />
         </el-select>
       </el-form-item>
 

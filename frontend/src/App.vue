@@ -30,14 +30,14 @@ onMounted(() => {
   <div class="topbar">
     <div class="brand">₿ CRYPTO-SIM</div>
     <nav class="nav">
-      <RouterLink to="/dashboard">Dashboard</RouterLink>
-      <RouterLink to="/market">Market</RouterLink>
-      <RouterLink to="/orders">Orders</RouterLink>
+      <RouterLink to="/dashboard">总览</RouterLink>
+      <RouterLink to="/market">行情交易</RouterLink>
+      <RouterLink to="/orders">订单记录</RouterLink>
     </nav>
     <div class="spacer" />
     <div class="status">
       <span class="dot" :class="{ ok: connected }" />
-      {{ connected ? `Backend v${backendVersion}` : '后端未连接' }}
+      {{ connected ? `已连接 · v${backendVersion}` : '后端未连接，请检查后端是否启动' }}
     </div>
   </div>
   <RouterView />

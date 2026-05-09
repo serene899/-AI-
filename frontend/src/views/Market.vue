@@ -47,21 +47,21 @@ function onSubmitted() {
       <div class="spacer" style="flex:1" />
       <div v-if="currentTicker" style="display:flex;gap:18px;align-items:center">
         <div>
-          <div class="muted" style="font-size:11px">LAST</div>
+          <div class="muted" style="font-size:11px">最新价</div>
           <div style="font-size:22px;font-weight:600">{{ currentTicker.last }}</div>
         </div>
         <div>
-          <div class="muted" style="font-size:11px">24H CHG</div>
+          <div class="muted" style="font-size:11px">24H 涨跌</div>
           <div :class="{ up: (currentTicker.change24h ?? 0) >= 0, down: (currentTicker.change24h ?? 0) < 0 }">
             {{ ((currentTicker.change24h ?? 0) * 100).toFixed(2) }}%
           </div>
         </div>
         <div>
-          <div class="muted" style="font-size:11px">24H HIGH</div>
+          <div class="muted" style="font-size:11px">24H 最高</div>
           <div>{{ currentTicker.high24h }}</div>
         </div>
         <div>
-          <div class="muted" style="font-size:11px">24H LOW</div>
+          <div class="muted" style="font-size:11px">24H 最低</div>
           <div>{{ currentTicker.low24h }}</div>
         </div>
       </div>
@@ -72,7 +72,7 @@ function onSubmitted() {
         <KLineChart :symbol="store.currentSymbol" :interval="interval" />
       </div>
       <div class="panel">
-        <h2 class="section-title">PLACE ORDER</h2>
+        <h2 class="section-title">下单面板</h2>
         <OrderForm
           :symbol="store.currentSymbol"
           :last-price="currentTicker?.last"
