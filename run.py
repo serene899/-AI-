@@ -49,6 +49,26 @@ def need(cmd: str) -> str:
     return path
 
 
+# ---------- python version check ----------
+def check_python_version():
+    major, minor = sys.version_info[:2]
+    log("python", f"检测到 Python {major}.{minor}.{sys.version_info[2]}", "90")
+    if (major, minor) < (3, 10):
+        log("ERR", "Python 版本过低，需要 3.10+。请升级到 3.12 或 3.13。", "31")
+        sys.exit(1)
+    if (major, minor) >= (3, 14):
+        log("WARN", "=" * 60, "33")
+        log("WARN", f"你在使用 Python {major}.{minor}，这是一个非常新的版本。", "33")
+        log("WARN", "部分依赖 (pydantic-core 等) 可能尚未发布对应 wheel，", "33")
+        log("WARN", "会尝试从源码编译，需要 Rust + C 编译器，容易失败。", "33")
+        log("WARN", "", "33")
+        log("WARN", "★ 强烈建议改用 Python 3.12 或 3.13：", "33")
+        log("WARN", "   https://www.python.org/downloads/", "33")
+        log("WARN", "=" * 60, "33")
+        log("WARN", "5 秒后继续尝试安装。按 Ctrl+C 中止。", "33")
+        time.sleep(5)
+
+
 # ---------- setup ----------
 def ensure_backend():
     venv_marker = BACKEND / ".deps_installed"
@@ -58,7 +78,24 @@ def ensure_backend():
         log("backend", "依赖已安装，跳过", "90")
         return
     log("backend", "安装 Python 依赖 ...", "35")
-    run([sys.executable, "-m", "pip", "install", "-r", str(req)])
+    # 先升级 pip 自身，新版 pip 能找到更多 wheel
+    try:
+        run([sys.executable, "-m", "pip", "install", "--upgrade", "pip", "-q"], check=False)
+    except Exception:
+        pass
+    try:
+        run([sys.executable, "-m", "pip", "install", "-r", str(req)])
+    except subprocess.CalledProcessError:
+        log("ERR", "=" * 60, "31")
+        log("ERR", "Python 依赖安装失败。最常见原因：", "31")
+        log("ERR", "  1) Python 3.14 过新，部分依赖尚未发布预编译 wheel", "31")
+        log("ERR", "     → 改用 Python 3.12 或 3.13 即可", "31")
+        log("ERR", "  2) 网络访问 PyPI 缓慢/受限", "31")
+        log("ERR", "     → 可换国内镜像：", "31")
+        log("ERR", "       pip install -r backend/requirements.txt \\", "31")
+        log("ERR", "         -i https://pypi.tuna.tsinghua.edu.cn/simple", "31")
+        log("ERR", "=" * 60, "31")
+        sys.exit(1)
     venv_marker.write_text("ok")
 
     # 拷贝 .env.example 到 .env（如果不存在）
@@ -137,6 +174,7 @@ def open_browser():
 def main():
     log("boot", "Crypto Sim 启动中 ...", "36")
 
+    check_python_version()
     ensure_backend()
     ensure_frontend()
 
