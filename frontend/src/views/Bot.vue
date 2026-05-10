@@ -19,6 +19,24 @@ const logCursors = reactive<Record<number, number>>({})
 /** 折叠状态（默认已停止的自动折叠） */
 const collapsed = reactive<Record<number, boolean>>({})
 
+/** 活跃状态集合（running / initializing / error 都算活跃） */
+const ACTIVE_STATUSES = new Set(['running', 'initializing', 'error'])
+
+/** 活跃机器人 —— 运行中 / 初始化中 / 出错 */
+const activeBots = computed(() =>
+  bots.value.filter((b) => ACTIVE_STATUSES.has(b.status))
+)
+/** 归档机器人 —— 已停止 */
+const archivedBots = computed(() =>
+  bots.value.filter((b) => b.status === 'stopped')
+)
+
+/** 归档面板是否展开（默认折叠） */
+const archiveOpen = ref(false)
+
+/** 重启中的机器人 id，用于按钮 loading */
+const restartingIds = ref<Set<number>>(new Set())
+
 // ========== 创建机器人表单 ==========
 const form = reactive<{
   strategy: string
@@ -197,6 +215,58 @@ async function onStopAll() {
   } catch {}
 }
 
+/**
+ * 以原机器人的策略 / 币种 / 参数再启动一个新实例。
+ * 原归档记录保留，新实例是独立的新机器人（新 id）。
+ */
+async function onRestart(bot: Bot) {
+  try {
+    await ElMessageBox.confirm(
+      `将以相同策略和参数创建一个新的机器人实例：\n\n${strategyName(bot.strategy)} · ${bot.symbol}\n${paramSummary(bot)}\n\n确认启动？`,
+      '▶ 再次启动策略',
+      { type: 'info', confirmButtonText: '启动', cancelButtonText: '取消' }
+    )
+    restartingIds.value.add(bot.id)
+    // 只抽取该策略定义里声明过的字段，避免把旧的冗余字段塞给后端
+    const st = strategies.value.find((s) => s.key === bot.strategy)
+    const cleanParams: Record<string, number | string> = {}
+    if (st) {
+      st.fields.forEach((f) => {
+        if (bot.params[f.name] !== undefined) {
+          cleanParams[f.name] = bot.params[f.name]
+        } else {
+          cleanParams[f.name] = f.default
+        }
+      })
+    } else {
+      Object.assign(cleanParams, bot.params)
+    }
+    await api.startBot(bot.strategy, bot.symbol, cleanParams)
+    ElMessage.success('策略已重新启动（作为新机器人）')
+    await refreshBots()
+  } catch {
+  } finally {
+    restartingIds.value.delete(bot.id)
+  }
+}
+
+/** 把归档机器人参数填到顶部"创建"表单里，方便用户改后再启动 */
+function fillFormFromBot(bot: Bot) {
+  form.strategy = bot.strategy
+  form.symbol = bot.symbol
+  Object.keys(form.params).forEach((k) => delete form.params[k])
+  const st = strategies.value.find((s) => s.key === bot.strategy)
+  if (st) {
+    st.fields.forEach((f) => {
+      form.params[f.name] = bot.params[f.name] ?? f.default
+    })
+  } else {
+    Object.assign(form.params, bot.params)
+  }
+  ElMessage.success('参数已载入顶部表单，可修改后重新启动')
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
 // ========== 工具函数 ==========
 function fmt(n: number | null | undefined, d = 4): string {
   if (n === null || n === undefined || isNaN(n as number)) return '--'
@@ -347,88 +417,30 @@ onUnmounted(() => {
       <div v-if="riskHint" class="warn-hint">⚠ {{ riskHint }}</div>
     </div>
 
-    <!-- ========== 机器人列表 ========== -->
+    <!-- ========== 活跃机器人（运行中 / 初始化中 / 错误） ========== -->
     <div class="panel">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-        <h2 class="section-title" style="margin:0">机器人列表</h2>
+      <div class="panel-header">
+        <h2 class="section-title" style="margin:0">
+          🟢 活跃机器人
+          <span class="count-badge">{{ activeBots.length }}</span>
+        </h2>
         <div>
           <el-button size="small" :loading="loading" @click="refreshBots">刷新</el-button>
-          <el-button size="small" type="danger" @click="onStopAll">🚨 停止全部</el-button>
+          <el-button
+            v-if="activeBots.length"
+            size="small"
+            type="danger"
+            @click="onStopAll"
+          >🚨 停止全部</el-button>
         </div>
       </div>
 
-      <el-empty v-if="!bots.length" description="暂无机器人，快去上方创建一个吧 🤖" />
+      <el-empty
+        v-if="!activeBots.length"
+        description="暂无活跃机器人，上方可创建一个，或从下方归档中再次启动"
+      />
 
-      <!-- 状态速览表（Task 4：状态列一目了然） -->
-      <el-table
-        v-if="bots.length"
-        :data="bots"
-        size="small"
-        stripe
-        style="margin-bottom:16px"
-      >
-        <el-table-column prop="id" label="编号" width="60" />
-        <el-table-column label="状态" width="110">
-          <template #default="{ row }">
-            <el-tag
-              :type="(statusMeta(row).type as any)"
-              size="small"
-              effect="dark"
-            >
-              {{ statusMeta(row).label }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="策略">
-          <template #default="{ row }">
-            {{ strategyName(row.strategy) }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="symbol" label="交易币种" width="120" />
-        <el-table-column label="金额 (USDT)" width="120">
-          <template #default="{ row }">
-            {{ fmt(row.params.amount_usdt, 2) }}
-          </template>
-        </el-table-column>
-        <el-table-column label="成交" width="70">
-          <template #default="{ row }">{{ row.stats.trades ?? 0 }}</template>
-        </el-table-column>
-        <el-table-column label="盈亏 (USDT)" width="130">
-          <template #default="{ row }">
-            <span :class="{ up: profitOf(row) >= 0, down: profitOf(row) < 0 }">
-              {{ fmt(profitOf(row), 2) }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="运行时长" width="100">
-          <template #default="{ row }">{{ runDuration(row) }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right">
-          <template #default="{ row }">
-            <el-button
-              v-if="row.running"
-              size="small"
-              link
-              type="primary"
-              @click="openEditDialog(row)"
-            >编辑</el-button>
-            <el-button
-              v-if="row.running"
-              size="small"
-              link
-              type="danger"
-              @click="onStop(row)"
-            >停止</el-button>
-            <el-button
-              size="small"
-              link
-              @click="collapsed[row.id] = !collapsed[row.id]"
-            >{{ collapsed[row.id] ? '详情' : '收起' }}</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-
-      <div v-for="b in bots" :key="b.id" class="bot-card" :class="'status-' + b.status">
+      <div v-for="b in activeBots" :key="b.id" class="bot-card" :class="'status-' + b.status">
         <!-- 卡片头 -->
         <div class="bot-header">
           <div class="bot-title">
@@ -438,9 +450,7 @@ onUnmounted(() => {
             <span class="title-main">
               #{{ b.id }} · {{ strategyName(b.strategy) }} · {{ b.symbol }}
             </span>
-            <span class="muted" style="font-size:12px">
-              · {{ runDuration(b) }}
-            </span>
+            <span class="muted" style="font-size:12px">· {{ runDuration(b) }}</span>
           </div>
           <div>
             <el-button
@@ -449,22 +459,14 @@ onUnmounted(() => {
               type="primary"
               plain
               @click="openEditDialog(b)"
-            >
-              ♨ 编辑参数
-            </el-button>
+            >♨ 编辑参数</el-button>
             <el-button
               v-if="b.running"
               size="small"
               type="danger"
               @click="onStop(b)"
-            >
-              停止
-            </el-button>
-            <el-button
-              size="small"
-              link
-              @click="collapsed[b.id] = !collapsed[b.id]"
-            >
+            >停止</el-button>
+            <el-button size="small" link @click="collapsed[b.id] = !collapsed[b.id]">
               {{ collapsed[b.id] ? '展开' : '折叠' }}
             </el-button>
           </div>
@@ -517,10 +519,9 @@ onUnmounted(() => {
           <!-- 实时日志终端 -->
           <div class="log-header muted">
             实时日志 · 启动 {{ fmtTime(b.started_at) }}
-            <span v-if="b.stopped_at"> · 停止 {{ fmtTime(b.stopped_at) }}</span>
             <span style="float:right">
               <span class="dot-live" :class="{ active: b.running }"></span>
-              {{ b.running ? '直播中' : '回看' }}
+              {{ b.running ? '直播中' : '已暂停' }}
             </span>
           </div>
           <div :id="'log-' + b.id" class="log-terminal">
@@ -541,6 +542,87 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- ========== 历史归档（已停止的机器人） ========== -->
+    <div class="panel archive-panel">
+      <div class="panel-header archive-header" @click="archiveOpen = !archiveOpen">
+        <h2 class="section-title" style="margin:0">
+          📁 历史归档
+          <span class="count-badge">{{ archivedBots.length }}</span>
+        </h2>
+        <el-button size="small" text>
+          {{ archiveOpen ? '收起 ▲' : '展开 ▼' }}
+        </el-button>
+      </div>
+
+      <template v-if="archiveOpen">
+        <el-empty
+          v-if="!archivedBots.length"
+          description="暂无归档记录"
+          :image-size="80"
+        />
+
+        <!-- 归档速览表 —— 紧凑展示 + 一键再启动 -->
+        <el-table
+          v-if="archivedBots.length"
+          :data="archivedBots"
+          size="small"
+          stripe
+          style="margin-bottom:12px"
+        >
+          <el-table-column prop="id" label="编号" width="60" />
+          <el-table-column label="策略">
+            <template #default="{ row }">{{ strategyName(row.strategy) }}</template>
+          </el-table-column>
+          <el-table-column prop="symbol" label="币种" width="110" />
+          <el-table-column label="参数" min-width="200">
+            <template #default="{ row }">
+              <span class="muted" style="font-size:12px">{{ paramSummary(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="成交" width="70">
+            <template #default="{ row }">{{ row.stats.trades ?? 0 }}</template>
+          </el-table-column>
+          <el-table-column label="盈亏 (USDT)" width="120">
+            <template #default="{ row }">
+              <span :class="{ up: profitOf(row) >= 0, down: profitOf(row) < 0 }">
+                {{ fmt(profitOf(row), 2) }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="运行时长" width="100">
+            <template #default="{ row }">{{ runDuration(row) }}</template>
+          </el-table-column>
+          <el-table-column label="停止时间" width="160">
+            <template #default="{ row }">
+              <span class="muted" style="font-size:12px">
+                {{ fmtTime(row.stopped_at) }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="170" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                size="small"
+                type="success"
+                :loading="restartingIds.has(row.id)"
+                @click="onRestart(row)"
+              >▶ 再次启动</el-button>
+              <el-button
+                size="small"
+                link
+                type="primary"
+                @click="fillFormFromBot(row)"
+              >载入参数</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+
+      <div v-else class="muted archive-collapsed-hint">
+        {{ archivedBots.length }} 条历史记录，点击展开可查看详情并重新启动
       </div>
     </div>
 
@@ -585,6 +667,52 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 7px;
+  margin-left: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  vertical-align: middle;
+}
+
+.archive-panel {
+  margin-top: 20px;
+  opacity: 0.96;
+  background: rgba(44, 44, 46, 0.52);
+}
+.archive-header {
+  cursor: pointer;
+  margin-bottom: 0;
+  user-select: none;
+  transition: opacity 0.15s ease;
+}
+.archive-header:hover { opacity: 0.85; }
+.archive-header + * { margin-top: 12px; }
+
+.archive-collapsed-hint {
+  font-size: 12px;
+  padding: 4px 2px 0;
+}
+
 .bot-card {
   border: 1px solid var(--border);
   border-left: 3px solid var(--text-sub);
