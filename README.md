@@ -167,6 +167,17 @@ BACKEND_PORT=8000
 
 ## ❓ FAQ
 
+**Q: 安装依赖时报错 `Failed building wheel for pydantic-core`？**
+你大概率在用 **Python 3.14**。该版本过新，部分依赖还没发布预编译包，pip 会尝试从源码编译并失败。
+✅ 解决：改用 **Python 3.12 或 3.13**（稳定版），从 https://www.python.org/downloads/ 下载。
+安装后删掉 `backend/.deps_installed` 标记文件，重新 `python run.py` 即可。
+
+**Q: 国内 PyPI 下载慢？**
+```bash
+pip install -r backend/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+npm 也可用淘宝镜像：`npm config set registry https://registry.npmmirror.com`
+
 **Q: OKX 行情拉不到 / 国内网络？**
 OKX 在国内大部分地区可直连。若失败，检查防火墙或在 `backend/.env` 里把 `EXCHANGE` 预留切换（后续可扩展 Binance）。
 

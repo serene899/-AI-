@@ -3,7 +3,7 @@ import { ElMessage } from 'element-plus'
 
 const http = axios.create({
   baseURL: '/',
-  timeout: 15000,
+  timeout: 30000,  // OKX 偶发慢；后端已加缓存兜底，前端再给足预算
 })
 
 // 统一错误处理
@@ -21,6 +21,14 @@ http.interceptors.response.use(
     return data
   },
   (err: AxiosError<any>) => {
+    // 超时/网络抖动不弹红条，避免界面频繁炸开；只在控制台记录
+    const isTimeout = err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '')
+    const isNetwork = !err.response
+    if (isTimeout || isNetwork) {
+      // 静默失败；调用方自行决定是否重试
+      console.warn('[api] transient error:', err.message)
+      return Promise.reject(err)
+    }
     const msg =
       err.response?.data?.detail ||
       err.response?.data?.message ||
@@ -70,6 +78,24 @@ export interface AccountSnapshot {
   positions: Position[]
 }
 
+// 资产净值曲线 —— 供 Dashboard 折线图使用
+export interface EquityPoint {
+  ts: string
+  equity: number
+  cash: number
+  position_value: number
+  unrealized_pnl: number
+}
+export interface EquityCurve {
+  range: string          // 1H | 1D | 1W | 1M | ALL
+  points: EquityPoint[]
+  first: number
+  last: number
+  change: number
+  change_pct: number
+}
+export type EquityRange = '1H' | '1D' | '1W' | '1M' | 'ALL'
+
 export interface Order {
   id: number
   symbol: string
@@ -90,15 +116,78 @@ export interface Trade {
   side: 'buy' | 'sell'
   quantity: number
   price: number
+  fee?: number
   created_at: string
+}
+
+export interface StrategyField {
+  name: string
+  label: string
+  type: string           // 'number' | 'select'
+  default: number | string
+  min?: number
+  max?: number
+  options?: string[]     // select 型选项
+  hot?: boolean          // 是否支持热更新
+}
+
+export interface StrategyDef {
+  key: string
+  name: string
+  description: string
+  fields: StrategyField[]
+}
+
+export interface BotLog {
+  ts: string
+  ts_epoch: number
+  level: 'info' | 'trade' | 'error'
+  message: string
+}
+
+export type BotStatus = 'initializing' | 'running' | 'error' | 'stopped'
+
+export interface Bot {
+  id: number
+  strategy: string
+  symbol: string
+  params: Record<string, any>
+  status: BotStatus
+  running: boolean
+  started_at: string
+  stopped_at: string | null
+  last_error: string | null
+  last_error_ts: string | null
+  consecutive_errors: number
+  stats: {
+    trades: number
+    buys: number
+    sells: number
+    total_buy_qty: number
+    total_sell_qty: number
+    total_spent: number
+    total_received: number
+    strategy_pnl?: number   // 策略盈亏 = 收回 + 净持仓估值 - 花费
+    last_price: number | null
+    reference_price: number | null
+    ma_short?: number | null
+    ma_long?: number | null
+    win_count?: number
+    loss_count?: number
+  }
+  logs: BotLog[]
 }
 
 // -------- API --------
 export const api = {
   health: () => http.get('/health'),
-  config: () => http.get<any, { exchange: string; symbols: string[]; version: string }>('/api/v1/config'),
+  config: () =>
+    http.get<any, { exchange: string; symbols: string[]; version: string }>(
+      '/api/v1/config'
+    ),
 
-  ticker: (symbol: string) => http.get<any, Ticker>('/api/v1/market/ticker', { params: { symbol } }),
+  ticker: (symbol: string) =>
+    http.get<any, Ticker>('/api/v1/market/ticker', { params: { symbol } }),
   tickers: (symbols?: string[]) =>
     http.get<any, Ticker[]>('/api/v1/market/tickers', {
       params: symbols ? { symbols: symbols.join(',') } : {},
@@ -112,6 +201,10 @@ export const api = {
   resetAccount: (initial_capital: number) =>
     http.post<any, AccountSnapshot>('/api/v1/account/reset', { initial_capital }),
 
+  // 资产净值曲线（Dashboard 折线图）
+  equityCurve: (range: EquityRange = '1D') =>
+    http.get<any, EquityCurve>('/api/v1/account/equity', { params: { range } }),
+
   createOrder: (body: {
     symbol: string
     side: 'buy' | 'sell'
@@ -124,6 +217,19 @@ export const api = {
     http.get<any, Order[]>('/api/v1/orders', { params: status ? { status } : {} }),
   cancelOrder: (id: number) => http.delete<any, Order>(`/api/v1/orders/${id}`),
   listTrades: () => http.get<any, Trade[]>('/api/v1/trades'),
+
+  // -------- Bot --------
+  listStrategies: () => http.get<any, StrategyDef[]>('/api/v1/bot/strategies'),
+  listBots: () => http.get<any, Bot[]>('/api/v1/bot'),
+  getBot: (id: number) => http.get<any, Bot>(`/api/v1/bot/${id}`),
+  getBotLogs: (id: number, since_ts = 0) =>
+    http.get<any, BotLog[]>(`/api/v1/bot/${id}/logs`, { params: { since_ts } }),
+  startBot: (strategy: string, symbol: string, params: Record<string, any>) =>
+    http.post<any, Bot>('/api/v1/bot/start', { strategy, symbol, params }),
+  stopBot: (id: number) => http.post<any, Bot>(`/api/v1/bot/stop/${id}`),
+  stopAllBots: () => http.post<any, Bot[]>('/api/v1/bot/stop-all'),
+  updateBotParams: (id: number, params: Record<string, any>) =>
+    http.patch<any, Bot>(`/api/v1/bot/${id}/params`, { params }),
 }
 
 export default api

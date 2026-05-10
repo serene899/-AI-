@@ -28,16 +28,20 @@ onMounted(() => {
 
 <template>
   <div class="topbar">
-    <div class="brand">₿ CRYPTO-SIM</div>
+    <div class="brand">
+      <span style="font-size:18px">◎</span>
+      <span>Crypto Sim</span>
+    </div>
     <nav class="nav">
-      <RouterLink to="/dashboard">Dashboard</RouterLink>
-      <RouterLink to="/market">Market</RouterLink>
-      <RouterLink to="/orders">Orders</RouterLink>
+      <RouterLink to="/dashboard">总览</RouterLink>
+      <RouterLink to="/market">行情交易</RouterLink>
+      <RouterLink to="/bot">策略中心</RouterLink>
+      <RouterLink to="/orders">订单记录</RouterLink>
     </nav>
     <div class="spacer" />
     <div class="status">
       <span class="dot" :class="{ ok: connected }" />
-      {{ connected ? `Backend v${backendVersion}` : '后端未连接' }}
+      {{ connected ? `已连接 · v${backendVersion}` : '未连接' }}
     </div>
   </div>
   <RouterView />
