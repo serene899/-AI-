@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api, { type Bot, type BotLog, type StrategyDef, type StrategyField } from '@/api'
 import { useAppStore } from '@/store/app'
+import { formatDateTime, formatTimeOnly } from '@/utils/time'
 
 const store = useAppStore()
 
@@ -206,12 +207,11 @@ function fmt(n: number | null | undefined, d = 4): string {
 }
 
 function fmtTime(s: string | null): string {
-  if (!s) return '--'
-  return new Date(s).toLocaleString('zh-CN', { hour12: false })
+  return formatDateTime(s)
 }
 
 function fmtShortTime(s: string): string {
-  return fmtTime(s).split(' ')[1] ?? s
+  return formatTimeOnly(s)
 }
 
 function strategyName(k: string): string {

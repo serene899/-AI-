@@ -6,6 +6,8 @@ SQLite + SQLModel 持久化层。
 - order      : 挂单 / 成交 / 撤单
 - trade      : 成交流水
 - bot_config : 自动交易机器人配置（参数落盘，支持热编辑 + 重启后可查）
+
+★ 所有 datetime 列默认使用北京时间（UTC+8）。
 """
 from datetime import datetime
 from typing import Optional
@@ -13,6 +15,7 @@ from typing import Optional
 from sqlmodel import Field, SQLModel, Session, create_engine, select
 
 from app.config import settings
+from app.core.time import now_cn
 
 
 # ---------- Models ----------
@@ -20,7 +23,7 @@ class Account(SQLModel, table=True):
     id: Optional[int] = Field(default=1, primary_key=True)
     cash: float
     initial_capital: float
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=now_cn)
 
 
 class Position(SQLModel, table=True):
@@ -28,7 +31,7 @@ class Position(SQLModel, table=True):
     symbol: str = Field(index=True, unique=True)
     quantity: float = 0.0
     avg_price: float = 0.0
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=now_cn)
 
 
 class Order(SQLModel, table=True):
@@ -41,7 +44,7 @@ class Order(SQLModel, table=True):
     status: str = Field(default="open", index=True)  # open|filled|cancelled
     filled_price: Optional[float] = None
     filled_at: Optional[datetime] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=now_cn)
 
 
 class Trade(SQLModel, table=True):
@@ -51,7 +54,7 @@ class Trade(SQLModel, table=True):
     side: str
     quantity: float
     price: float
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=now_cn)
 
 
 class BotConfig(SQLModel, table=True):
@@ -67,9 +70,9 @@ class BotConfig(SQLModel, table=True):
     params_json: str                            # JSON 字符串
     status: str = Field(default="initializing", index=True)
     last_error: Optional[str] = None
-    started_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime = Field(default_factory=now_cn)
     stopped_at: Optional[datetime] = None
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=now_cn)
 
 
 # ---------- Engine ----------

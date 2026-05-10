@@ -30,7 +30,10 @@ async function load() {
     const data = await api.kline(props.symbol, props.interval || '1m', 120)
     const times = data.candles.map((c) => {
       const d = new Date(c[0])
-      return d.toLocaleTimeString('en-GB', { hour12: false })
+      return d.toLocaleTimeString('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        hour12: false,
+      })
     })
     // ECharts candlestick data: [open, close, low, high]
     const candles = data.candles.map((c) => [c[1], c[4], c[3], c[2]])

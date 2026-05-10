@@ -33,6 +33,7 @@ from typing import Optional
 
 from sqlmodel import select
 
+from app.core.time import iso_cn, now_cn, ts_to_cn_iso
 from app.models.db import BotConfig, get_session
 from app.services import exchange
 from app.services import matching
@@ -150,7 +151,7 @@ def _config_to_dict(cfg: BotConfig, runtime: Optional[BotRuntime] = None,
             logs_src = logs_src[-50:]
         logs = [
             {
-                "ts": datetime.fromtimestamp(l.ts).isoformat(),
+                "ts": ts_to_cn_iso(l.ts),
                 "ts_epoch": l.ts,
                 "level": l.level,
                 "message": l.message,
@@ -164,10 +165,10 @@ def _config_to_dict(cfg: BotConfig, runtime: Optional[BotRuntime] = None,
         "params": params,
         "status": cfg.status,
         "running": cfg.status not in ("stopped", "error") and (runtime.running if runtime else False),
-        "started_at": cfg.started_at.isoformat() if cfg.started_at else None,
-        "stopped_at": cfg.stopped_at.isoformat() if cfg.stopped_at else None,
+        "started_at": iso_cn(cfg.started_at),
+        "stopped_at": iso_cn(cfg.stopped_at),
         "last_error": cfg.last_error,
-        "last_error_ts": cfg.updated_at.isoformat() if cfg.last_error else None,
+        "last_error_ts": iso_cn(cfg.updated_at) if cfg.last_error else None,
         "consecutive_errors": runtime.consecutive_errors if runtime else 0,
         "stats": runtime.stats if runtime else {},
         "logs": logs,
@@ -206,7 +207,7 @@ def _db_update_params(config_id: int, new_params: dict) -> Optional[BotConfig]:
         if cfg is None:
             return None
         cfg.params_json = json.dumps(new_params)
-        cfg.updated_at = datetime.utcnow()
+        cfg.updated_at = now_cn()
         session.add(cfg)
         session.commit()
         session.refresh(cfg)
@@ -224,8 +225,8 @@ def _db_update_status(config_id: int, status: str,
         if last_error is not None:
             cfg.last_error = last_error
         if mark_stopped and cfg.stopped_at is None:
-            cfg.stopped_at = datetime.utcnow()
-        cfg.updated_at = datetime.utcnow()
+            cfg.stopped_at = now_cn()
+        cfg.updated_at = now_cn()
         session.add(cfg)
         session.commit()
 
@@ -276,7 +277,7 @@ class BotManager:
             return []
         return [
             {
-                "ts": datetime.fromtimestamp(l.ts).isoformat(),
+                "ts": ts_to_cn_iso(l.ts),
                 "ts_epoch": l.ts,
                 "level": l.level,
                 "message": l.message,

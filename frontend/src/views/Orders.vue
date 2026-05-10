@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api, { type Order, type Trade } from '@/api'
+import { formatDateTime } from '@/utils/time'
 
 const activeTab = ref<'orders' | 'trades'>('orders')
 const status = ref<string>('')
@@ -34,8 +35,7 @@ function fmt(n: number | null | undefined, d = 4) {
 }
 
 function fmtTime(s: string | null) {
-  if (!s) return '--'
-  return new Date(s).toLocaleString('zh-CN', { hour12: false })
+  return formatDateTime(s)
 }
 
 onMounted(async () => {

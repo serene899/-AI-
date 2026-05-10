@@ -7,11 +7,11 @@
   sell limit: last_price >= order.price → 成交
 """
 import asyncio
-from datetime import datetime
 from typing import Optional
 
 from sqlmodel import Session, select
 
+from app.core.time import iso_cn, now_cn
 from app.models.db import Account, Order, Position, Trade, get_session
 from app.services import exchange
 
@@ -41,18 +41,18 @@ def _apply_fill(
             total_qty = pos.quantity + order.quantity
             pos.avg_price = (pos.avg_price * pos.quantity + cost) / total_qty
             pos.quantity = total_qty
-            pos.updated_at = datetime.utcnow()
+            pos.updated_at = now_cn()
     else:  # sell
         acc.cash += cost
         if pos is None or pos.quantity < order.quantity:
             raise MatchingError("持仓不足")
         pos.quantity -= order.quantity
-        pos.updated_at = datetime.utcnow()
+        pos.updated_at = now_cn()
         # 数量归零后保留行但 quantity=0，不清均价（历史参考）
 
     order.status = "filled"
     order.filled_price = fill_price
-    order.filled_at = datetime.utcnow()
+    order.filled_at = now_cn()
 
     trade = Trade(
         order_id=order.id,
@@ -202,7 +202,7 @@ def list_trades(limit: int = 200) -> list[dict]:
                 "side": t.side,
                 "quantity": t.quantity,
                 "price": t.price,
-                "created_at": t.created_at.isoformat(),
+                "created_at": iso_cn(t.created_at),
             }
             for t in trades
         ]
@@ -218,8 +218,8 @@ def _serialize_order(o: Order) -> dict:
         "price": o.price,
         "status": o.status,
         "filled_price": o.filled_price,
-        "filled_at": o.filled_at.isoformat() if o.filled_at else None,
-        "created_at": o.created_at.isoformat(),
+        "filled_at": iso_cn(o.filled_at),
+        "created_at": iso_cn(o.created_at),
     }
 
 
