@@ -1,20 +1,40 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import api from '@/api'
+import api, { type Bot } from '@/api'
 import { useAppStore } from '@/store/app'
 
 const store = useAppStore()
 const loading = ref(false)
+const runningBots = ref<Bot[]>([])
 let timer: number | undefined
 
 async function refresh() {
   try {
     loading.value = true
-    await Promise.all([store.refreshAccount(), store.refreshTickers()])
+    const [_, __, bs] = await Promise.all([
+      store.refreshAccount(),
+      store.refreshTickers(),
+      api.listBots(),
+    ])
+    runningBots.value = (bs as Bot[]).filter((b) => b.running)
   } finally {
     loading.value = false
   }
+}
+
+async function handleKillAll() {
+  if (!runningBots.value.length) return ElMessage.info('当前没有运行中的机器人')
+  try {
+    await ElMessageBox.confirm(
+      `🚨 确认停止全部 ${runningBots.value.length} 个运行中的机器人？`,
+      '应急停机',
+      { type: 'warning', confirmButtonText: '全部停止', cancelButtonText: '取消' }
+    )
+    await api.stopAllBots()
+    ElMessage.success('已停止所有机器人')
+    await refresh()
+  } catch {}
 }
 
 async function handleReset() {
@@ -51,6 +71,14 @@ onUnmounted(() => {
       <h2 class="section-title">账户总览</h2>
       <div>
         <el-button size="small" :loading="loading" @click="refresh">刷新数据</el-button>
+        <el-button
+          v-if="runningBots.length"
+          size="small"
+          type="danger"
+          @click="handleKillAll"
+        >
+          🚨 应急停机 ({{ runningBots.length }})
+        </el-button>
         <el-button size="small" type="danger" plain @click="handleReset">重置账户</el-button>
       </div>
     </div>

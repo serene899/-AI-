@@ -96,10 +96,12 @@ export interface Trade {
 export interface StrategyField {
   name: string
   label: string
-  type: string
-  default: number
+  type: string           // 'number' | 'select'
+  default: number | string
   min?: number
   max?: number
+  options?: string[]     // select 型选项
+  hot?: boolean          // 是否支持热更新
 }
 
 export interface StrategyDef {
@@ -111,18 +113,25 @@ export interface StrategyDef {
 
 export interface BotLog {
   ts: string
+  ts_epoch: number
   level: 'info' | 'trade' | 'error'
   message: string
 }
+
+export type BotStatus = 'initializing' | 'running' | 'error' | 'stopped'
 
 export interface Bot {
   id: number
   strategy: string
   symbol: string
   params: Record<string, any>
+  status: BotStatus
   running: boolean
   started_at: string
   stopped_at: string | null
+  last_error: string | null
+  last_error_ts: string | null
+  consecutive_errors: number
   stats: {
     trades: number
     buys: number
@@ -133,6 +142,10 @@ export interface Bot {
     total_received: number
     last_price: number | null
     reference_price: number | null
+    ma_short?: number | null
+    ma_long?: number | null
+    win_count?: number
+    loss_count?: number
   }
   logs: BotLog[]
 }
@@ -140,9 +153,13 @@ export interface Bot {
 // -------- API --------
 export const api = {
   health: () => http.get('/health'),
-  config: () => http.get<any, { exchange: string; symbols: string[]; version: string }>('/api/v1/config'),
+  config: () =>
+    http.get<any, { exchange: string; symbols: string[]; version: string }>(
+      '/api/v1/config'
+    ),
 
-  ticker: (symbol: string) => http.get<any, Ticker>('/api/v1/market/ticker', { params: { symbol } }),
+  ticker: (symbol: string) =>
+    http.get<any, Ticker>('/api/v1/market/ticker', { params: { symbol } }),
   tickers: (symbols?: string[]) =>
     http.get<any, Ticker[]>('/api/v1/market/tickers', {
       params: symbols ? { symbols: symbols.join(',') } : {},
@@ -172,9 +189,15 @@ export const api = {
   // -------- Bot --------
   listStrategies: () => http.get<any, StrategyDef[]>('/api/v1/bot/strategies'),
   listBots: () => http.get<any, Bot[]>('/api/v1/bot'),
+  getBot: (id: number) => http.get<any, Bot>(`/api/v1/bot/${id}`),
+  getBotLogs: (id: number, since_ts = 0) =>
+    http.get<any, BotLog[]>(`/api/v1/bot/${id}/logs`, { params: { since_ts } }),
   startBot: (strategy: string, symbol: string, params: Record<string, any>) =>
     http.post<any, Bot>('/api/v1/bot/start', { strategy, symbol, params }),
   stopBot: (id: number) => http.post<any, Bot>(`/api/v1/bot/stop/${id}`),
+  stopAllBots: () => http.post<any, Bot[]>('/api/v1/bot/stop-all'),
+  updateBotParams: (id: number, params: Record<string, any>) =>
+    http.patch<any, Bot>(`/api/v1/bot/${id}/params`, { params }),
 }
 
 export default api
