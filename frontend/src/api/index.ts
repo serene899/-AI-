@@ -3,7 +3,7 @@ import { ElMessage } from 'element-plus'
 
 const http = axios.create({
   baseURL: '/',
-  timeout: 15000,
+  timeout: 30000,  // OKX 偶发慢；后端已加缓存兜底，前端再给足预算
 })
 
 // 统一错误处理
@@ -21,6 +21,14 @@ http.interceptors.response.use(
     return data
   },
   (err: AxiosError<any>) => {
+    // 超时/网络抖动不弹红条，避免界面频繁炸开；只在控制台记录
+    const isTimeout = err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '')
+    const isNetwork = !err.response
+    if (isTimeout || isNetwork) {
+      // 静默失败；调用方自行决定是否重试
+      console.warn('[api] transient error:', err.message)
+      return Promise.reject(err)
+    }
     const msg =
       err.response?.data?.detail ||
       err.response?.data?.message ||
@@ -140,6 +148,7 @@ export interface Bot {
     total_sell_qty: number
     total_spent: number
     total_received: number
+    strategy_pnl?: number   // 策略盈亏 = 收回 + 净持仓估值 - 花费
     last_price: number | null
     reference_price: number | null
     ma_short?: number | null

@@ -1,16 +1,17 @@
 """
-统一时区工具 —— 系统默认 Asia/Shanghai (UTC+8)。
+统一时区工具 —— 存储用 UTC，展示用 Asia/Shanghai。
 
-设计原则：
-1) 新生成的时间戳使用 `now_cn()`，返回 aware datetime（带 +08:00 时区信息）
-2) 从 DB 读出的老数据如果是 naive（没时区信息）则兜底为 UTC 再转 CN，
-   这样之前库里按 utcnow() 存的值不会偏移
-3) 序列化交给前端的时间一律带 '+08:00' 后缀，前端拿到后无论跑在哪个时区
-   的浏览器里都能正确还原
+存储约定（和业内通用做法一致）：
+    - 数据库里所有 datetime 列存 naive UTC（即 datetime.utcnow() 的输出）。
+      这样旧数据（此前就是 utcnow 写进去的）零成本兼容。
+    - 展示/序列化时一律通过 iso_cn()，把 naive UTC 按 UTC 解释后转到 CN
+      时区，输出带 '+08:00' 后缀，前端 new Date 能正确解析。
 
-注：使用固定偏移 UTC+8 而非 ZoneInfo("Asia/Shanghai")。
-   中国大陆自 1991 年起没有夏令时，恒定 UTC+8，固定偏移足够用，
-   且避免部分精简部署环境缺 tzdata 数据库的问题。
+    永远不要让展示逻辑和存储逻辑共享"这个 datetime 是什么时区"的假设，
+    由这个模块统一把关，业务代码只需：
+        now_utc()         # 写库
+        iso_cn(dt)        # 读库->前端
+        ts_to_cn_iso(ts)  # 运行时 epoch -> 前端
 """
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -18,29 +19,31 @@ from typing import Optional
 CN_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 
-def now_cn() -> datetime:
-    """返回当前北京时间（aware datetime, UTC+8）。供 DB default_factory 使用。"""
-    return datetime.now(CN_TZ)
+def now_utc() -> datetime:
+    """UTC naive，存库用；与旧代码的 datetime.utcnow() 语义一致。"""
+    return datetime.utcnow()
 
 
-def to_cn(dt: Optional[datetime]) -> Optional[datetime]:
-    """
-    把任意 datetime 转成北京时间 aware datetime。
-    naive 的老数据假定为 UTC（兼容重构前 datetime.utcnow() 存入的值）。
-    """
+# 保留旧名字作为别名，方便外部调用方不改名
+now_cn = now_utc
+
+
+def _to_cn_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """把任意 datetime 规范化为带 +08:00 tzinfo 的 aware datetime。"""
     if dt is None:
         return None
     if dt.tzinfo is None:
+        # 存储约定：naive 就是 UTC
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(CN_TZ)
 
 
 def iso_cn(dt: Optional[datetime]) -> Optional[str]:
-    """序列化为带 +08:00 后缀的 ISO 字符串。DB/日志时间一律过这个函数。"""
-    v = to_cn(dt)
+    """序列化为带 +08:00 后缀的 ISO 字符串。"""
+    v = _to_cn_aware(dt)
     return v.isoformat() if v else None
 
 
 def ts_to_cn_iso(ts: float) -> str:
-    """epoch 秒 -> 北京时间 ISO 字符串。用于日志条目。"""
+    """epoch 秒 -> 北京时间 ISO 字符串（运行时日志用）。"""
     return datetime.fromtimestamp(ts, CN_TZ).isoformat()

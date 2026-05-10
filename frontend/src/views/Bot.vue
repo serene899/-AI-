@@ -219,7 +219,11 @@ function strategyName(k: string): string {
 }
 
 function profitOf(b: Bot): number {
-  return b.stats.total_received - b.stats.total_spent
+  // 后端已计算 strategy_pnl = 已收回 + 净持仓估值 - 已花费
+  // 兼容旧返回（没带 strategy_pnl 时，退化为受影响的旧公式）
+  const v = (b.stats as any).strategy_pnl
+  if (typeof v === 'number') return v
+  return (b.stats.total_received || 0) - (b.stats.total_spent || 0)
 }
 
 function winRate(b: Bot): string {
@@ -491,7 +495,7 @@ onUnmounted(() => {
             <div><span class="muted">已花费</span><b>${{ fmt(b.stats.total_spent, 2) }}</b></div>
             <div><span class="muted">已收回</span><b>${{ fmt(b.stats.total_received, 2) }}</b></div>
             <div>
-              <span class="muted">已实现盈亏</span>
+              <span class="muted">策略盈亏</span>
               <b :class="{ up: profitOf(b) >= 0, down: profitOf(b) < 0 }">
                 ${{ fmt(profitOf(b), 2) }}
               </b>

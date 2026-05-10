@@ -137,6 +137,30 @@ class BotRuntime:
 # =============================================================================
 # 数据库访问层（全部放一起，方便定位）
 # =============================================================================
+def _compute_strategy_pnl(stats: dict) -> float:
+    """
+    策略盈亏 = 已收回 USDT + 本策略净持仓按现价的估值 - 已花费 USDT
+    这样买入不会被当作亏损：
+        · 买 10 USDT、价格不动 -> pnl = 0 + (10)  - 10 = 0
+        · 买 10、价格涨 10%    -> pnl = 0 + 11    - 10 = +1
+        · 买 10 卖回 11        -> pnl = 11 + 0    - 10 = +1
+    注：净持仓估值用 runtime 里累计的 buy/sell qty，避免与账户级 position 串扰。
+    """
+    buy_qty = float(stats.get("total_buy_qty") or 0)
+    sell_qty = float(stats.get("total_sell_qty") or 0)
+    net_qty = max(buy_qty - sell_qty, 0.0)   # 卖多于买只发生在初始就持有的情况，按 0 算保守
+    last = stats.get("last_price")
+    if last is None or net_qty <= 0:
+        current_value = 0.0
+    else:
+        current_value = net_qty * float(last)
+    return (
+        float(stats.get("total_received") or 0)
+        + current_value
+        - float(stats.get("total_spent") or 0)
+    )
+
+
 def _config_to_dict(cfg: BotConfig, runtime: Optional[BotRuntime] = None,
                     logs_since_ts: float = 0.0) -> dict:
     """把 DB 行 + runtime 合并成前端用的 dict。"""
@@ -158,6 +182,10 @@ def _config_to_dict(cfg: BotConfig, runtime: Optional[BotRuntime] = None,
             }
             for l in logs_src
         ]
+    stats = dict(runtime.stats) if runtime else {}
+    # ★ 计算策略盈亏 —— 买入不会被当作亏损
+    if stats:
+        stats["strategy_pnl"] = _compute_strategy_pnl(stats)
     return {
         "id": cfg.id,
         "strategy": cfg.strategy,
@@ -170,7 +198,7 @@ def _config_to_dict(cfg: BotConfig, runtime: Optional[BotRuntime] = None,
         "last_error": cfg.last_error,
         "last_error_ts": iso_cn(cfg.updated_at) if cfg.last_error else None,
         "consecutive_errors": runtime.consecutive_errors if runtime else 0,
-        "stats": runtime.stats if runtime else {},
+        "stats": stats,
         "logs": logs,
     }
 

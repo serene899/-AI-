@@ -176,13 +176,9 @@ const percents = [0.25, 0.5, 0.75, 1]
 <template>
   <div class="order-form">
     <!-- 买/卖切换 -->
-    <el-radio-group v-model="side" class="side-switch">
-      <el-radio-button label="buy">
-        <span :class="side === 'buy' ? 'up' : 'muted'">买入</span>
-      </el-radio-button>
-      <el-radio-button label="sell">
-        <span :class="side === 'sell' ? 'down' : 'muted'">卖出</span>
-      </el-radio-button>
+    <el-radio-group v-model="side" class="side-switch" size="large">
+      <el-radio-button label="buy">买入</el-radio-button>
+      <el-radio-button label="sell">卖出</el-radio-button>
     </el-radio-group>
 
     <el-form label-position="top" size="default">
@@ -281,18 +277,50 @@ const percents = [0.25, 0.5, 0.75, 1]
 <style scoped>
 .order-form { }
 
-.side-switch { margin-bottom: 14px; display: block; }
-.side-switch :deep(.el-radio-button__inner) { padding: 8px 22px; font-weight: 600; }
+.side-switch {
+  margin-bottom: 14px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+}
+.side-switch :deep(.el-radio-button) { width: 100%; }
+.side-switch :deep(.el-radio-button__inner) {
+  width: 100%;
+  padding: 10px 0;
+  font-weight: 600;
+  font-size: 15px;
+}
+/* 买入选中 —— 绿 */
+.side-switch :deep(.el-radio-button:first-child .el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: var(--up);
+  border-color: var(--up);
+  box-shadow: -1px 0 0 0 var(--up);
+  color: #0b0e14;
+}
+/* 卖出选中 —— 红 */
+.side-switch :deep(.el-radio-button:last-child .el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: var(--down);
+  border-color: var(--down);
+  box-shadow: -1px 0 0 0 var(--down);
+  color: #0b0e14;
+}
 
 .amount-label {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
+  gap: 12px;
   font-size: 13px;
   width: 100%;
+  flex-wrap: wrap;
 }
-.hint-right { font-size: 11px; }
+.hint-right {
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: right;
+  flex: 1;
+  min-width: 0;
+}
 .hint-right b { color: var(--text-main); margin: 0 3px; font-weight: 600; }
 .accent-tag {
   color: var(--accent);
@@ -302,6 +330,7 @@ const percents = [0.25, 0.5, 0.75, 1]
   padding: 0 4px;
   margin-left: 6px;
   opacity: 0.85;
+  white-space: nowrap;
 }
 
 .convert-hint {
