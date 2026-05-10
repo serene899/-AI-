@@ -155,7 +155,7 @@ async function pullAllLogs() {
 
 // ========== 操作 ==========
 async function onStart() {
-  if (!form.symbol) return ElMessage.warning('请选择交易对')
+  if (!form.symbol) return ElMessage.warning('请选择交易币种')
   try {
     submitting.value = true
     await api.startBot(form.strategy, form.symbol, { ...form.params })
@@ -298,7 +298,7 @@ onUnmounted(() => {
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="交易对">
+        <el-form-item label="交易币种">
           <el-select v-model="form.symbol" style="width:180px">
             <el-option v-for="s in store.symbols" :key="s" :label="s" :value="s" />
           </el-select>
@@ -354,6 +354,75 @@ onUnmounted(() => {
       </div>
 
       <el-empty v-if="!bots.length" description="暂无机器人，快去上方创建一个吧 🤖" />
+
+      <!-- 状态速览表（Task 4：状态列一目了然） -->
+      <el-table
+        v-if="bots.length"
+        :data="bots"
+        size="small"
+        stripe
+        style="margin-bottom:16px"
+      >
+        <el-table-column prop="id" label="编号" width="60" />
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag
+              :type="(statusMeta(row).type as any)"
+              size="small"
+              effect="dark"
+            >
+              {{ statusMeta(row).label }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="策略">
+          <template #default="{ row }">
+            {{ strategyName(row.strategy) }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="symbol" label="交易币种" width="120" />
+        <el-table-column label="金额 (USDT)" width="120">
+          <template #default="{ row }">
+            {{ fmt(row.params.amount_usdt, 2) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="成交" width="70">
+          <template #default="{ row }">{{ row.stats.trades ?? 0 }}</template>
+        </el-table-column>
+        <el-table-column label="盈亏 (USDT)" width="130">
+          <template #default="{ row }">
+            <span :class="{ up: profitOf(row) >= 0, down: profitOf(row) < 0 }">
+              {{ fmt(profitOf(row), 2) }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="运行时长" width="100">
+          <template #default="{ row }">{{ runDuration(row) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="160" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              v-if="row.running"
+              size="small"
+              link
+              type="primary"
+              @click="openEditDialog(row)"
+            >编辑</el-button>
+            <el-button
+              v-if="row.running"
+              size="small"
+              link
+              type="danger"
+              @click="onStop(row)"
+            >停止</el-button>
+            <el-button
+              size="small"
+              link
+              @click="collapsed[row.id] = !collapsed[row.id]"
+            >{{ collapsed[row.id] ? '详情' : '收起' }}</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
 
       <div v-for="b in bots" :key="b.id" class="bot-card" :class="'status-' + b.status">
         <!-- 卡片头 -->
@@ -479,7 +548,7 @@ onUnmounted(() => {
     >
       <div v-if="editingBot" class="muted" style="font-size:12px;margin-bottom:12px">
         修改后会在下一轮循环立即生效（当前 sleep 会被唤醒）。
-        仅 ♨ 标记字段可热修改；交易对和策略类型需要停止后重建。
+        仅 ♨ 标记字段可热修改；交易币种和策略类型需要停止后重建。
       </div>
       <el-form v-if="editingBot" label-position="top">
         <el-form-item

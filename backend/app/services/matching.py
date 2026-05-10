@@ -76,12 +76,40 @@ async def place_order(
     price: Optional[float] = None,
 ) -> dict:
     """下单入口。返回 order dict。"""
+    # ── 严格类型/精度处理 ──────────────────────────────────
+    # 前端换算完 USDT → qty 后传 float 过来；如果万一传了字符串，
+    # 这里兜底 coerce 一次，避免 "'0.01' * 68000" 之类的字符串乘法爆炸。
+    try:
+        quantity = float(quantity)
+    except (TypeError, ValueError):
+        raise MatchingError(f"数量必须为数值，收到: {quantity!r}")
+    if not (quantity > 0):
+        raise MatchingError("数量必须 > 0")
+    # 精度防护：对齐 8 位小数，防止浮点误差导致撮合/持仓判定不稳
+    quantity = round(quantity, 8)
+    if quantity <= 0:
+        raise MatchingError("数量舍入后为 0，请提高下单金额")
+
+    if price is not None:
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            raise MatchingError(f"价格必须为数值，收到: {price!r}")
+        if price <= 0:
+            raise MatchingError("价格必须 > 0")
+        price = round(price, 8)
+
     if type_ == "limit" and price is None:
         raise MatchingError("限价单必须提供 price")
+    if type_ not in ("market", "limit"):
+        raise MatchingError(f"未知订单类型: {type_}")
+    if side not in ("buy", "sell"):
+        raise MatchingError(f"未知方向: {side}")
+    # ───────────────────────────────────────────────────
 
     # 获取当前价（用于市价成交或资金预检）
     ticker = await exchange.get_ticker(symbol)
-    last_price = ticker["last"]
+    last_price = float(ticker["last"])
 
     with get_session() as session:
         acc = session.exec(select(Account).where(Account.id == 1)).first()

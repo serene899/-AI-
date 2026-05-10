@@ -284,6 +284,38 @@ class BotManager:
             for l in rt.logs if l.ts > since_ts
         ]
 
+    # -------- Resume on startup ----------
+    async def resume_from_db(self) -> int:
+        """
+        服务启动时调用：把数据库里 status ∈ {running, initializing} 的机器人重新拉起。
+        这就是"重启/刷新不丢机器人"的核心。
+        """
+        active = _db_list_active()
+        if not active:
+            return 0
+        count = 0
+        for cfg in active:
+            # 跳过已经拉起过的（正常不会走到，但防御一下）
+            if cfg.id in self._runtimes:
+                continue
+            rt = BotRuntime(config_id=cfg.id)
+            rt.log("info",
+                   f"🔄 服务启动时从数据库恢复 · 策略={cfg.strategy.upper()} · {cfg.symbol}")
+            self._runtimes[cfg.id] = rt
+            rt.task = asyncio.create_task(self._run(cfg.id))
+            count += 1
+        return count
+
+    def cancel_tasks_preserve_status(self) -> None:
+        """
+        服务优雅关闭时调用：只 cancel 异步任务，不改 DB 状态。
+        这样下次启动时 status 还是 running，能被 resume_from_db 拉起来。
+        （用户主动点"停止"才调 stop() 把 DB 写成 stopped）
+        """
+        for rt in self._runtimes.values():
+            if rt.task and not rt.task.done():
+                rt.task.cancel()
+
     # -------- Start ----------
     async def start(self, strategy: str, symbol: str, params: dict) -> dict:
         strategy = strategy.lower()
