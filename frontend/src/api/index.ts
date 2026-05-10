@@ -171,7 +171,8 @@ export const api = {
 
   // -------- Bot --------
   listStrategies: () => http.get<any, StrategyDef[]>('/api/v1/bot/strategies'),
-  listBots: () => http.get<any, Bot[]>('/api/v1/bot'),
+  listBots: (status?: string) =>
+    http.get<any, Bot[]>('/api/v1/bot', { params: status ? { status } : {} }),
   startBot: (strategy: string, symbol: string, params: Record<string, any>) =>
     http.post<any, Bot>('/api/v1/bot/start', { strategy, symbol, params }),
   stopBot: (id: number) => http.post<any, Bot>(`/api/v1/bot/stop/${id}`),

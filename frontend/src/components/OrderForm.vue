@@ -39,13 +39,13 @@ async function submit() {
 </script>
 
 <template>
-  <div>
-    <el-radio-group v-model="side" style="margin-bottom:12px">
+  <div class="order-form">
+    <el-radio-group v-model="side" class="side-switch">
       <el-radio-button label="buy">
-        <span style="color:var(--up)">买入</span>
+        <span class="side-label side-buy">买入</span>
       </el-radio-button>
       <el-radio-button label="sell">
-        <span style="color:var(--down)">卖出</span>
+        <span class="side-label side-sell">卖出</span>
       </el-radio-button>
     </el-radio-group>
 
@@ -65,19 +65,79 @@ async function submit() {
         <el-input-number v-model="price" :min="0" :step="1" :precision="4" style="width:100%" />
       </el-form-item>
 
-      <div class="muted" style="font-size:12px;margin-bottom:10px">
-        当前价: {{ lastPrice ?? '--' }} · 预估金额:
-        ${{ lastPrice && quantity ? (lastPrice * quantity).toFixed(2) : '--' }}
+      <div class="order-hint">
+        <div>
+          <span class="muted">当前价</span>
+          <span>{{ lastPrice ?? '--' }}</span>
+        </div>
+        <div>
+          <span class="muted">预估金额</span>
+          <span>${{ lastPrice && quantity ? (lastPrice * quantity).toFixed(2) : '--' }}</span>
+        </div>
       </div>
 
       <el-button
         :type="side === 'buy' ? 'success' : 'danger'"
         :loading="submitting"
         @click="submit"
-        style="width:100%"
+        class="submit-btn"
       >
         确认{{ side === 'buy' ? '买入' : '卖出' }} {{ symbol }}
       </el-button>
     </el-form>
   </div>
 </template>
+
+<style scoped>
+.order-form { }
+.side-switch {
+  margin-bottom: 16px;
+  width: 100%;
+  display: flex;
+}
+.side-switch :deep(.el-radio-button),
+.side-switch :deep(.el-radio-button__inner) {
+  width: 100%;
+  flex: 1;
+}
+.side-label {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.side-buy { color: var(--up); }
+.side-sell { color: var(--down); }
+.el-radio-button__original-radio:checked + .el-radio-button__inner .side-label {
+  color: #fff !important;
+}
+
+.order-hint {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 10px;
+  font-size: 12px;
+}
+.order-hint > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.order-hint .muted {
+  font-size: 11px;
+}
+.order-hint > div > span:last-child {
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.submit-btn {
+  width: 100%;
+  height: 42px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 12px !important;
+}
+</style>

@@ -7,9 +7,11 @@ import { useAppStore } from '@/store/app'
 const store = useAppStore()
 
 const strategies = ref<StrategyDef[]>([])
-const bots = ref<Bot[]>([])
+const activeBots = ref<Bot[]>([])
+const stoppedBots = ref<Bot[]>([])
 const loading = ref(false)
 const submitting = ref(false)
+const showHistory = ref(false)
 
 // 表单状态
 const form = reactive<{ strategy: string; symbol: string; params: Record<string, number> }>({
@@ -27,9 +29,14 @@ let timer: number | undefined
 async function loadAll() {
   try {
     loading.value = true
-    const [s, bs] = await Promise.all([api.listStrategies(), api.listBots()])
+    const [s, active, stopped] = await Promise.all([
+      api.listStrategies(),
+      api.listBots('running'),
+      api.listBots('stopped'),
+    ])
     strategies.value = s
-    bots.value = bs
+    activeBots.value = active
+    stoppedBots.value = stopped
     // 初次填充表单默认参数
     if (!Object.keys(form.params).length) resetParams()
   } finally {
@@ -90,8 +97,20 @@ function strategyName(k: string) {
 }
 
 function profitOf(b: Bot) {
-  // 粗略已实现盈亏 = 卖出所得 - 买入花费（未考虑当前持仓市值）
-  return b.stats.total_received - b.stats.total_spent
+  // 总盈亏 = 未实现 + 已实现（由后端计算）
+  return (b.stats as any).total_pnl ?? 0
+}
+
+function unrealizedOf(b: Bot) {
+  return (b.stats as any).unrealized_pnl ?? 0
+}
+
+function realizedOf(b: Bot) {
+  return (b.stats as any).realized_pnl ?? 0
+}
+
+function holdingValueOf(b: Bot) {
+  return (b.stats as any).holding_value ?? 0
 }
 
 onMounted(async () => {
@@ -155,22 +174,21 @@ onUnmounted(() => {
 
     <div class="panel">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-        <h2 class="section-title" style="margin:0">运行中 / 历史机器人</h2>
+        <h2 class="section-title" style="margin:0">🟢 运行中的机器人</h2>
         <el-button size="small" :loading="loading" @click="loadAll">刷新</el-button>
       </div>
 
-      <el-empty v-if="!bots.length" description="暂无机器人，快去上方创建一个吧 🤖" />
+      <el-empty v-if="!activeBots.length" description="暂无运行中的机器人，快去上方创建一个吧" />
 
-      <div v-for="b in bots" :key="b.id" class="bot-card" style="margin-bottom:14px">
+      <div v-for="b in activeBots" :key="b.id" class="bot-card" style="margin-bottom:14px">
         <div class="bot-header">
           <div>
-            <el-tag v-if="b.running" type="success" size="small">运行中</el-tag>
-            <el-tag v-else type="info" size="small">已停止</el-tag>
+            <el-tag type="success" size="small">运行中</el-tag>
             <span style="margin-left:8px;font-weight:600">
               #{{ b.id }} · {{ strategyName(b.strategy) }} · {{ b.symbol }}
             </span>
           </div>
-          <el-button v-if="b.running" size="small" type="danger" @click="onStop(b)">
+          <el-button size="small" type="danger" @click="onStop(b)">
             停止
           </el-button>
         </div>
@@ -184,7 +202,17 @@ onUnmounted(() => {
           <div><span class="muted">已花费</span><b>${{ fmt(b.stats.total_spent, 2) }}</b></div>
           <div><span class="muted">已收回</span><b>${{ fmt(b.stats.total_received, 2) }}</b></div>
           <div>
-            <span class="muted">已实现盈亏</span>
+            <span class="muted">持仓市值</span>
+            <b>${{ fmt(holdingValueOf(b), 2) }}</b>
+          </div>
+          <div>
+            <span class="muted">未实现盈亏</span>
+            <b :class="{ up: unrealizedOf(b) >= 0, down: unrealizedOf(b) < 0 }">
+              ${{ fmt(unrealizedOf(b), 2) }}
+            </b>
+          </div>
+          <div>
+            <span class="muted">总盈亏</span>
             <b :class="{ up: profitOf(b) >= 0, down: profitOf(b) < 0 }">
               ${{ fmt(profitOf(b), 2) }}
             </b>
@@ -200,7 +228,6 @@ onUnmounted(() => {
         <div class="bot-logs">
           <div class="muted" style="font-size:11px;margin-bottom:6px">
             实时日志（最近 20 条） · 启动于 {{ fmtTime(b.started_at) }}
-            <span v-if="b.stopped_at"> · 停止于 {{ fmtTime(b.stopped_at) }}</span>
           </div>
           <div class="log-scroll">
             <div
@@ -218,59 +245,137 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+
+    <!-- 历史归档 -->
+    <div class="panel" style="margin-top:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h2 class="section-title" style="margin:0">
+          📁 历史归档
+          <span class="muted" style="font-size:12px;margin-left:8px">({{ stoppedBots.length }})</span>
+        </h2>
+        <el-button size="small" text @click="showHistory = !showHistory">
+          {{ showHistory ? '收起' : '展开' }}
+        </el-button>
+      </div>
+
+      <template v-if="showHistory">
+        <el-empty v-if="!stoppedBots.length" description="暂无历史记录" />
+
+        <div v-for="b in stoppedBots" :key="b.id" class="bot-card bot-card--stopped" style="margin-bottom:14px">
+          <div class="bot-header">
+            <div>
+              <el-tag type="info" size="small">已停止</el-tag>
+              <span style="margin-left:8px;font-weight:600">
+                #{{ b.id }} · {{ strategyName(b.strategy) }} · {{ b.symbol }}
+              </span>
+            </div>
+            <span class="muted" style="font-size:12px">
+              停止于 {{ fmtTime(b.stopped_at) }}
+            </span>
+          </div>
+
+          <div class="bot-stats">
+            <div><span class="muted">成交次数</span><b>{{ b.stats.trades }}</b></div>
+            <div><span class="muted">买入次数</span><b class="up">{{ b.stats.buys }}</b></div>
+            <div><span class="muted">卖出次数</span><b class="down">{{ b.stats.sells }}</b></div>
+            <div><span class="muted">已花费</span><b>${{ fmt(b.stats.total_spent, 2) }}</b></div>
+            <div><span class="muted">已收回</span><b>${{ fmt(b.stats.total_received, 2) }}</b></div>
+            <div>
+              <span class="muted">总盈亏</span>
+              <b :class="{ up: profitOf(b) >= 0, down: profitOf(b) < 0 }">
+                ${{ fmt(profitOf(b), 2) }}
+              </b>
+            </div>
+          </div>
+
+          <div class="muted" style="font-size:11px;margin-top:6px">
+            运行时间: {{ fmtTime(b.started_at) }} ~ {{ fmtTime(b.stopped_at) }}
+          </div>
+        </div>
+      </template>
+
+      <div v-else class="muted" style="font-size:13px;padding:8px 0">
+        点击「展开」查看 {{ stoppedBots.length }} 条历史记录
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .bot-card {
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 14px 16px;
-  background: #121722;
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  background: rgba(58, 58, 60, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: all 0.2s ease;
+}
+.bot-card:hover {
+  border-color: var(--border-strong);
+}
+.bot-card--stopped {
+  opacity: 0.72;
+  background: rgba(44, 44, 46, 0.35);
 }
 .bot-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .bot-stats {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 10px 16px;
-  padding: 10px 0;
-  border-top: 1px dashed var(--border);
-  border-bottom: 1px dashed var(--border);
-  margin-bottom: 12px;
+  /* 自适应列数，最小宽度 140px 保证数字不会被截断重叠 */
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 14px 20px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
 }
 .bot-stats > div {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  font-size: 13px;
+  gap: 4px;
+  font-size: 14px;
+  min-width: 0; /* 关键：防止 grid 子元素撑出 */
 }
-.bot-stats .muted { font-size: 11px; }
-.bot-logs { }
+.bot-stats > div b {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 15px;
+}
+.bot-stats .muted {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.bot-logs {}
 .log-scroll {
-  max-height: 200px;
+  max-height: 220px;
   overflow-y: auto;
-  background: #0b0e14;
+  background: rgba(0, 0, 0, 0.28);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-family: 'JetBrains Mono', monospace;
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-family: var(--font-mono);
   font-size: 12px;
+  line-height: 1.7;
 }
 .log-line {
-  padding: 2px 0;
+  padding: 1px 0;
   color: var(--text-main);
+  word-break: break-word;
 }
 .log-line.trade { color: var(--accent); }
 .log-line.error { color: var(--down); }
 .log-line.info { color: var(--text-sub); }
-.log-ts { color: var(--text-sub); margin-right: 8px; }
+.log-ts { color: var(--text-tertiary); margin-right: 10px; }
 .log-tag { color: var(--text-sub); margin-right: 6px; }
-@media (max-width: 900px) {
-  .bot-stats { grid-template-columns: repeat(2, 1fr); }
-}
 </style>

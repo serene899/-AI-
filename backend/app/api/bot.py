@@ -1,5 +1,7 @@
 """自动交易机器人 API。"""
-from fastapi import APIRouter, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.core.response import ok
@@ -42,8 +44,8 @@ async def list_strategies():
 
 
 @router.get("")
-async def list_bots():
-    return ok(bot_manager.list())
+async def list_bots(status: Optional[str] = Query(None, description="running | stopped")):
+    return ok(bot_manager.list(status=status))
 
 
 @router.post("/start")

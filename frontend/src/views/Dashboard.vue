@@ -47,9 +47,9 @@ onUnmounted(() => {
 
 <template>
   <div class="page">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-      <h2 class="section-title">账户总览</h2>
-      <div>
+    <div class="dashboard-header">
+      <h2 class="section-title" style="margin:0">账户总览</h2>
+      <div class="dashboard-actions">
         <el-button size="small" :loading="loading" @click="refresh">刷新数据</el-button>
         <el-button size="small" type="danger" plain @click="handleReset">重置账户</el-button>
       </div>
@@ -82,7 +82,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div style="height:20px" />
+    <div style="height:24px" />
 
     <div class="panel">
       <h2 class="section-title">我的持仓</h2>
@@ -102,7 +102,7 @@ onUnmounted(() => {
       </el-table>
     </div>
 
-    <div style="height:20px" />
+    <div style="height:24px" />
 
     <div class="panel">
       <h2 class="section-title">热门行情</h2>
@@ -123,3 +123,18 @@ onUnmounted(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.dashboard-actions {
+  display: flex;
+  gap: 8px;
+}
+</style>

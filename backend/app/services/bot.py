@@ -39,6 +39,7 @@ class BotRunner:
         "trades": 0, "buys": 0, "sells": 0,
         "total_buy_qty": 0.0, "total_sell_qty": 0.0,
         "total_spent": 0.0, "total_received": 0.0,
+        "holding_qty": 0.0,       # 该bot净持仓量 = buy_qty - sell_qty
         "last_price": None, "reference_price": None,
     })
     logs: list = field(default_factory=list)
@@ -51,6 +52,29 @@ class BotRunner:
             self.logs = self.logs[-100:]
 
     def to_dict(self) -> dict:
+        # 计算未实现盈亏: 持仓市值 - (花费 - 已收回)
+        holding_qty = self.stats.get("holding_qty", 0.0)
+        last_price = self.stats.get("last_price") or 0.0
+        holding_value = holding_qty * last_price
+        net_cost = self.stats["total_spent"] - self.stats["total_received"]
+        unrealized_pnl = holding_value - net_cost if holding_qty > 0 else 0.0
+        # 已实现盈亏: 只计算已平仓部分
+        realized_pnl = self.stats["total_received"] - (
+            self.stats["total_spent"] * (self.stats["total_sell_qty"] / self.stats["total_buy_qty"])
+            if self.stats["total_buy_qty"] > 0 and self.stats["total_sell_qty"] > 0
+            else 0.0
+        )
+        # 总盈亏 = 未实现 + 已实现
+        total_pnl = unrealized_pnl + realized_pnl
+
+        stats_out = {
+            **self.stats,
+            "holding_value": round(holding_value, 4),
+            "unrealized_pnl": round(unrealized_pnl, 4),
+            "realized_pnl": round(realized_pnl, 4),
+            "total_pnl": round(total_pnl, 4),
+        }
+
         return {
             "id": self.id,
             "strategy": self.strategy,
@@ -62,7 +86,7 @@ class BotRunner:
                 datetime.fromtimestamp(self.stopped_at).isoformat()
                 if self.stopped_at else None
             ),
-            "stats": self.stats,
+            "stats": stats_out,
             "logs": [
                 {
                     "ts": datetime.fromtimestamp(l.ts).isoformat(),
@@ -79,11 +103,16 @@ class BotManager:
         self._id_seq = itertools.count(1)
         self._bots: dict[int, BotRunner] = {}
 
-    def list(self) -> list:
+    def list(self, status: str | None = None) -> list:
+        """返回 bot 列表。status: 'running' | 'stopped' | None(全部)"""
         items = sorted(
             self._bots.values(),
             key=lambda b: (not b.running, -b.started_at),
         )
+        if status == "running":
+            items = [b for b in items if b.running]
+        elif status == "stopped":
+            items = [b for b in items if not b.running]
         return [b.to_dict() for b in items]
 
     def get(self, bot_id: int) -> Optional[dict]:
@@ -184,6 +213,7 @@ class BotManager:
                         b.stats["buys"] += 1
                         b.stats["total_buy_qty"] += qty
                         b.stats["total_spent"] += qty * last
+                        b.stats["holding_qty"] += qty
                         b.log(
                             "trade",
                             f"定投买入 {qty} {b.symbol} @ {last:.4f} (约 ${qty*last:.2f})",
@@ -239,6 +269,7 @@ class BotManager:
                             b.stats["buys"] += 1
                             b.stats["total_buy_qty"] += quantity
                             b.stats["total_spent"] += quantity * last
+                            b.stats["holding_qty"] += quantity
                             b.log(
                                 "trade",
                                 f"跌破触发 买入 {quantity} {b.symbol} @ {last:.4f} "
@@ -260,6 +291,7 @@ class BotManager:
                             b.stats["sells"] += 1
                             b.stats["total_sell_qty"] += quantity
                             b.stats["total_received"] += quantity * last
+                            b.stats["holding_qty"] -= quantity
                             b.log(
                                 "trade",
                                 f"涨破触发 卖出 {quantity} {b.symbol} @ {last:.4f} "
