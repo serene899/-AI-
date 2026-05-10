@@ -78,6 +78,7 @@ async def get_bot_logs(
     since_ts: float = Query(0.0, description="只返回此 epoch 秒之后的日志，实现增量拉取"),
 ):
     """增量拉日志，减少带宽。"""
-    if bot_id not in bot_manager._bots:
+    # 先校验机器人是否存在（走公共 API，不依赖内部字段名）
+    if bot_manager.get(bot_id) is None:
         raise HTTPException(status_code=404, detail="机器人不存在")
     return ok(bot_manager.get_logs(bot_id, since_ts=since_ts))
