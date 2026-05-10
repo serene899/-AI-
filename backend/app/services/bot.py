@@ -1,24 +1,39 @@
 """
-自动交易机器人管理器 v2.0。
+自动交易机器人管理器 v3.0 — SQLite-backed hot reload。
 
-三大策略（全部参数统一以 USDT 计价）:
-- DCA  (定投):   每 interval_sec 秒市价买入 amount_usdt 美元
-- GRID (网格):   跌 drop_pct 自动买入 amount_usdt / 涨 rise_pct 自动卖出等量持仓
-- MA   (双均线):  MA_short 上穿 MA_long 金叉买入 amount_usdt；下穿死叉卖出等量持仓
+关键设计：
+    ┌───────────────────────────────────────────────┐
+    │  SQLite (BotConfig table)  ← 配置的唯一真源     │
+    │  ├── params_json (JSON 字符串)                 │
+    │  └── status / last_error / timestamps          │
+    └───────────────────────────────────────────────┘
+              ▲                           ▲
+              │ 每轮 SELECT 读最新参数      │ PATCH /bot/{id}/params 写
+              │                           │
+    ┌────────────────────┐        ┌──────────────┐
+    │ 策略循环 (asyncio) │        │ 前端编辑按钮 │
+    └────────────────────┘        └──────────────┘
 
-核心特性:
-- Hot-reload: 运行中可热更新参数，当前 sleep 被立即中断，新参数下一轮生效
-- Status 机器:      initializing -> running -> error -> stopped
-- 熔断:             连续 MAX_ERRORS 次错误自动停机
-- 所有下单均通过 matching.place_order() 统一走撮合/账户逻辑
+三大策略（全部以 USDT 为输入单位，1 USDT 起步）:
+- DCA  (定投):     每 interval_sec 秒市价买入 amount_usdt 美元
+- GRID (网格):     跌 drop_pct 买入 amount_usdt；涨 rise_pct 卖等量
+- MA   (双均线):   短均线上穿长均线金叉买入；下穿死叉卖出
+
+热编辑流程：
+    1. 用户 PATCH 参数 → 写 SQLite → 触发 asyncio.Event 唤醒 sleep
+    2. 策略下一轮 while 开头 → SELECT 从 DB 拿最新 params → 按新值执行
+    3. 机器人不停、不重启、下一轮立即按新参数跑
 """
 import asyncio
-import itertools
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+from sqlmodel import select
+
+from app.models.db import BotConfig, get_session
 from app.services import exchange
 from app.services import matching
 
@@ -33,12 +48,12 @@ MAX_LOG_ENTRIES = 200
 STRATEGY_DEFS = [
     {
         "key": "dca",
-        "name": "定投 DCA",
+        "name": "定投策略",
         "description": "每隔固定时间按市价买入固定金额，简单稳健，适合长线",
         "fields": [
-            {"name": "amount_usdt", "label": "每次买入金额 (USDT)", "type": "number",
+            {"name": "amount_usdt", "label": "单次投入金额 (USDT)", "type": "number",
              "default": 100, "min": 1, "hot": True},
-            {"name": "interval_sec", "label": "间隔时间 (秒)", "type": "number",
+            {"name": "interval_sec", "label": "定投间隔 (秒)", "type": "number",
              "default": 60, "min": 5, "hot": True},
         ],
     },
@@ -59,7 +74,7 @@ STRATEGY_DEFS = [
     },
     {
         "key": "ma",
-        "name": "双均线 MA",
+        "name": "双均线策略",
         "description": "短期均线上穿长期均线金叉买入；下穿死叉卖出持仓。经典趋势策略",
         "fields": [
             {"name": "amount_usdt", "label": "每次交易金额 (USDT)", "type": "number",
@@ -81,7 +96,7 @@ STRATEGY_KEYS = {s["key"] for s in STRATEGY_DEFS}
 
 
 # =============================================================================
-# 数据模型
+# 运行时数据（只放"不该持久化"的东西：任务句柄、日志环、唤醒事件、统计）
 # =============================================================================
 @dataclass
 class BotLogEntry:
@@ -91,18 +106,10 @@ class BotLogEntry:
 
 
 @dataclass
-class BotRunner:
-    id: int
-    strategy: str
-    symbol: str
-    params: dict
-    # 运行状态机: initializing -> running -> error -> stopped
-    status: str = "initializing"
+class BotRuntime:
+    """伴随一个 BotConfig 行的运行时状态，不落盘。"""
+    config_id: int
     running: bool = True
-    started_at: float = field(default_factory=time.time)
-    stopped_at: Optional[float] = None
-    last_error: Optional[str] = None
-    last_error_ts: Optional[float] = None
     consecutive_errors: int = 0
 
     stats: dict = field(default_factory=lambda: {
@@ -112,13 +119,12 @@ class BotRunner:
         "last_price": None,
         "reference_price": None,  # grid 用
         "ma_short": None, "ma_long": None,  # ma 用
-        "win_count": 0, "loss_count": 0,    # 胜率统计
     })
     logs: list = field(default_factory=list)
     task: Optional[asyncio.Task] = None
 
-    # ★ 热更新信号：params 变更时 set()，策略循环的 interruptible_sleep 会被唤醒
-    _params_changed: asyncio.Event = field(default_factory=asyncio.Event)
+    # ★ 热更新信号：params 变更时 set()，策略循环的 interruptible_sleep 被唤醒
+    params_changed: asyncio.Event = field(default_factory=asyncio.Event)
 
     def log(self, level: str, message: str) -> None:
         entry = BotLogEntry(ts=time.time(), level=level, message=message)
@@ -126,57 +132,121 @@ class BotRunner:
         if len(self.logs) > MAX_LOG_ENTRIES:
             self.logs = self.logs[-MAX_LOG_ENTRIES:]
 
-    def record_error(self, err: str) -> bool:
-        """记录错误，返回是否应触发熔断停机。"""
-        self.last_error = err
-        self.last_error_ts = time.time()
-        self.consecutive_errors += 1
-        self.log("error", err)
-        if self.consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-            self.status = "error"
-            return True
-        # 短暂挂红一下，下一轮成功会变回 running
-        self.status = "error"
-        return False
 
-    def record_success(self) -> None:
-        self.consecutive_errors = 0
-        if self.status != "stopped":
-            self.status = "running"
-
-    def to_dict(self, logs_since_ts: float = 0.0) -> dict:
-        logs = [l for l in self.logs if l.ts > logs_since_ts]
+# =============================================================================
+# 数据库访问层（全部放一起，方便定位）
+# =============================================================================
+def _config_to_dict(cfg: BotConfig, runtime: Optional[BotRuntime] = None,
+                    logs_since_ts: float = 0.0) -> dict:
+    """把 DB 行 + runtime 合并成前端用的 dict。"""
+    try:
+        params = json.loads(cfg.params_json)
+    except Exception:
+        params = {}
+    logs: list = []
+    if runtime:
+        logs_src = [l for l in runtime.logs if l.ts > logs_since_ts]
         if logs_since_ts == 0.0:
-            logs = logs[-50:]  # 初次加载只给最近 50 条
-        return {
-            "id": self.id,
-            "strategy": self.strategy,
-            "symbol": self.symbol,
-            "params": self.params,
-            "status": self.status,
-            "running": self.running,
-            "started_at": datetime.fromtimestamp(self.started_at).isoformat(),
-            "stopped_at": (
-                datetime.fromtimestamp(self.stopped_at).isoformat()
-                if self.stopped_at else None
-            ),
-            "last_error": self.last_error,
-            "last_error_ts": (
-                datetime.fromtimestamp(self.last_error_ts).isoformat()
-                if self.last_error_ts else None
-            ),
-            "consecutive_errors": self.consecutive_errors,
-            "stats": self.stats,
-            "logs": [
-                {
-                    "ts": datetime.fromtimestamp(l.ts).isoformat(),
-                    "ts_epoch": l.ts,
-                    "level": l.level,
-                    "message": l.message,
-                }
-                for l in logs
-            ],
-        }
+            logs_src = logs_src[-50:]
+        logs = [
+            {
+                "ts": datetime.fromtimestamp(l.ts).isoformat(),
+                "ts_epoch": l.ts,
+                "level": l.level,
+                "message": l.message,
+            }
+            for l in logs_src
+        ]
+    return {
+        "id": cfg.id,
+        "strategy": cfg.strategy,
+        "symbol": cfg.symbol,
+        "params": params,
+        "status": cfg.status,
+        "running": cfg.status not in ("stopped", "error") and (runtime.running if runtime else False),
+        "started_at": cfg.started_at.isoformat() if cfg.started_at else None,
+        "stopped_at": cfg.stopped_at.isoformat() if cfg.stopped_at else None,
+        "last_error": cfg.last_error,
+        "last_error_ts": cfg.updated_at.isoformat() if cfg.last_error else None,
+        "consecutive_errors": runtime.consecutive_errors if runtime else 0,
+        "stats": runtime.stats if runtime else {},
+        "logs": logs,
+    }
+
+
+def _db_insert(strategy: str, symbol: str, params: dict) -> BotConfig:
+    with get_session() as session:
+        cfg = BotConfig(
+            strategy=strategy,
+            symbol=symbol,
+            params_json=json.dumps(params),
+            status="initializing",
+        )
+        session.add(cfg)
+        session.commit()
+        session.refresh(cfg)
+        return cfg
+
+
+def _db_read_params(config_id: int) -> Optional[dict]:
+    """★ 每轮循环都走这里读最新参数。"""
+    with get_session() as session:
+        cfg = session.get(BotConfig, config_id)
+        if cfg is None:
+            return None
+        try:
+            return json.loads(cfg.params_json)
+        except Exception:
+            return None
+
+
+def _db_update_params(config_id: int, new_params: dict) -> Optional[BotConfig]:
+    with get_session() as session:
+        cfg = session.get(BotConfig, config_id)
+        if cfg is None:
+            return None
+        cfg.params_json = json.dumps(new_params)
+        cfg.updated_at = datetime.utcnow()
+        session.add(cfg)
+        session.commit()
+        session.refresh(cfg)
+        return cfg
+
+
+def _db_update_status(config_id: int, status: str,
+                      last_error: Optional[str] = None,
+                      mark_stopped: bool = False) -> None:
+    with get_session() as session:
+        cfg = session.get(BotConfig, config_id)
+        if cfg is None:
+            return
+        cfg.status = status
+        if last_error is not None:
+            cfg.last_error = last_error
+        if mark_stopped and cfg.stopped_at is None:
+            cfg.stopped_at = datetime.utcnow()
+        cfg.updated_at = datetime.utcnow()
+        session.add(cfg)
+        session.commit()
+
+
+def _db_get(config_id: int) -> Optional[BotConfig]:
+    with get_session() as session:
+        return session.get(BotConfig, config_id)
+
+
+def _db_list_all() -> list:
+    with get_session() as session:
+        return list(session.exec(select(BotConfig).order_by(BotConfig.id.desc())).all())
+
+
+def _db_list_active() -> list:
+    """启动时用：找到数据库里还是 running/initializing 状态的配置行。"""
+    with get_session() as session:
+        stmt = select(BotConfig).where(
+            BotConfig.status.in_(["running", "initializing"])
+        )
+        return list(session.exec(stmt).all())
 
 
 # =============================================================================
@@ -184,24 +254,25 @@ class BotRunner:
 # =============================================================================
 class BotManager:
     def __init__(self) -> None:
-        self._id_seq = itertools.count(1)
-        self._bots: dict[int, BotRunner] = {}
+        self._runtimes: dict[int, BotRuntime] = {}
 
     # -------- Query ----------
     def list(self) -> list:
-        items = sorted(
-            self._bots.values(),
-            key=lambda b: (b.status == "stopped", -b.started_at),
-        )
-        return [b.to_dict() for b in items]
+        rows = _db_list_all()
+        return [
+            _config_to_dict(cfg, self._runtimes.get(cfg.id))
+            for cfg in rows
+        ]
 
     def get(self, bot_id: int, logs_since_ts: float = 0.0) -> Optional[dict]:
-        b = self._bots.get(bot_id)
-        return b.to_dict(logs_since_ts=logs_since_ts) if b else None
+        cfg = _db_get(bot_id)
+        if cfg is None:
+            return None
+        return _config_to_dict(cfg, self._runtimes.get(bot_id), logs_since_ts=logs_since_ts)
 
     def get_logs(self, bot_id: int, since_ts: float = 0.0) -> list:
-        b = self._bots.get(bot_id)
-        if b is None:
+        rt = self._runtimes.get(bot_id)
+        if rt is None:
             return []
         return [
             {
@@ -210,7 +281,7 @@ class BotManager:
                 "level": l.level,
                 "message": l.message,
             }
-            for l in b.logs if l.ts > since_ts
+            for l in rt.logs if l.ts > since_ts
         ]
 
     # -------- Start ----------
@@ -221,80 +292,89 @@ class BotManager:
 
         params = self._validate(strategy, params)
 
-        for b in self._bots.values():
-            if b.running and b.symbol == symbol and b.strategy == strategy:
-                raise ValueError(
-                    f"已有一个运行中的 {strategy.upper()} 机器人在交易 {symbol}，请先停止它"
-                )
+        # 防重复：同一 (strategy, symbol) 只能有一个活着的
+        for cfg in _db_list_active():
+            if cfg.strategy == strategy and cfg.symbol == symbol and cfg.id in self._runtimes:
+                rt = self._runtimes.get(cfg.id)
+                if rt and rt.running:
+                    raise ValueError(
+                        f"已有一个运行中的【{strategy.upper()}】机器人在交易 {symbol}，请先停止它"
+                    )
 
-        bot_id = next(self._id_seq)
-        runner = BotRunner(id=bot_id, strategy=strategy, symbol=symbol, params=params)
-        runner.log(
+        # 1) 写 DB 建配置
+        cfg = _db_insert(strategy, symbol, params)
+        # 2) 建运行时
+        runtime = BotRuntime(config_id=cfg.id)
+        runtime.log(
             "info",
-            f"机器人启动 · 策略={strategy.upper()} · {symbol} · 参数={params}"
+            f"机器人启动 · 策略={strategy.upper()} · {symbol} · 参数={params}（配置已落盘）"
         )
-        self._bots[bot_id] = runner
-
-        runner.task = asyncio.create_task(self._run(runner))
-        return runner.to_dict()
+        self._runtimes[cfg.id] = runtime
+        # 3) 拉起 task
+        runtime.task = asyncio.create_task(self._run(cfg.id))
+        return _config_to_dict(_db_get(cfg.id), runtime)
 
     # -------- Hot-update params ----------
     def update_params(self, bot_id: int, new_params: dict) -> dict:
-        b = self._bots.get(bot_id)
-        if b is None:
+        cfg = _db_get(bot_id)
+        if cfg is None:
             raise ValueError("机器人不存在")
-        if not b.running:
+        rt = self._runtimes.get(bot_id)
+        if not rt or not rt.running or cfg.status == "stopped":
             raise ValueError("机器人已停止，无法修改参数")
 
-        # 只允许修改 hot=True 的字段
-        hot_fields = self._hot_fields(b.strategy)
+        hot_fields = self._hot_fields(cfg.strategy)
         filtered = {k: v for k, v in new_params.items() if k in hot_fields}
         if not filtered:
-            raise ValueError("没有可热更新的字段")
+            raise ValueError("没有可热编辑的字段")
 
-        merged = {**b.params, **filtered}
-        merged = self._validate(b.strategy, merged)  # 复用校验
+        current = json.loads(cfg.params_json)
+        merged = {**current, **filtered}
+        merged = self._validate(cfg.strategy, merged)
 
         changes = []
         for k, v in filtered.items():
-            old = b.params.get(k)
+            old = current.get(k)
             if old != v:
                 changes.append(f"{k}: {old} → {v}")
-        b.params = merged
+
+        # ★ 写回 SQLite —— 这是配置的唯一真源
+        _db_update_params(bot_id, merged)
 
         if changes:
-            b.log("info", "参数热更新：" + "；".join(changes))
-            # ★ 唤醒当前 sleep
-            b._params_changed.set()
-        return b.to_dict()
+            rt.log("info", "参数热编辑已写入数据库：" + "；".join(changes))
+            # 唤醒当前 sleep，策略下一轮从 DB 读到新值
+            rt.params_changed.set()
+
+        return _config_to_dict(_db_get(bot_id), rt)
 
     # -------- Stop ----------
     def stop(self, bot_id: int) -> dict:
-        b = self._bots.get(bot_id)
-        if b is None:
+        cfg = _db_get(bot_id)
+        if cfg is None:
             raise ValueError("机器人不存在")
-        if not b.running:
-            return b.to_dict()
-        b.running = False
-        b.stopped_at = time.time()
-        b.status = "stopped"
-        b.log("info", "收到停止指令")
-        # 同时唤醒可能在 sleep 的 task，让它立刻退出
-        b._params_changed.set()
-        if b.task and not b.task.done():
-            b.task.cancel()
-        return b.to_dict()
+        rt = self._runtimes.get(bot_id)
+        if not rt or not rt.running:
+            _db_update_status(bot_id, "stopped", mark_stopped=True)
+            return _config_to_dict(_db_get(bot_id), rt)
+
+        rt.running = False
+        rt.log("info", "收到停止指令")
+        _db_update_status(bot_id, "stopped", mark_stopped=True)
+        rt.params_changed.set()
+        if rt.task and not rt.task.done():
+            rt.task.cancel()
+        return _config_to_dict(_db_get(bot_id), rt)
 
     def stop_all(self) -> None:
-        for b in list(self._bots.values()):
-            if b.running:
-                try:
-                    self.stop(b.id)
-                except Exception:
-                    pass
+        for cid in list(self._runtimes.keys()):
+            try:
+                self.stop(cid)
+            except Exception:
+                pass
 
     # =========================================================================
-    # 校验：返回清理后的 params（数值类型统一）
+    # 参数校验
     # =========================================================================
     @staticmethod
     def _hot_fields(strategy: str) -> set:
@@ -317,9 +397,9 @@ class BotManager:
         amount = float(p.get("amount_usdt", 0))
         interval = int(p.get("interval_sec", 0))
         if amount <= 0:
-            raise ValueError("每次买入金额 (USDT) 必须 > 0")
+            raise ValueError("单次投入金额 (USDT) 必须 > 0")
         if interval < 5:
-            raise ValueError("间隔时间不能小于 5 秒")
+            raise ValueError("定投间隔不能小于 5 秒")
         return {"amount_usdt": amount, "interval_sec": interval}
 
     @staticmethod
@@ -369,141 +449,170 @@ class BotManager:
         }
 
     # =========================================================================
-    # 运行时：dispatcher
+    # 运行时：dispatcher（按配置行 ID 派发到具体策略）
     # =========================================================================
-    async def _run(self, b: BotRunner) -> None:
+    async def _run(self, config_id: int) -> None:
+        cfg = _db_get(config_id)
+        if cfg is None:
+            return
+        rt = self._runtimes.get(config_id)
+        if rt is None:
+            return
+        strategy = cfg.strategy
         try:
-            if b.strategy == "dca":
-                await self._run_dca(b)
-            elif b.strategy == "grid":
-                await self._run_grid(b)
-            elif b.strategy == "ma":
-                await self._run_ma(b)
+            if strategy == "dca":
+                await self._run_dca(rt, cfg.symbol)
+            elif strategy == "grid":
+                await self._run_grid(rt, cfg.symbol)
+            elif strategy == "ma":
+                await self._run_ma(rt, cfg.symbol)
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            b.log("error", f"机器人异常退出: {type(e).__name__}: {e}")
-            b.status = "error"
+            rt.log("error", f"机器人异常退出: {type(e).__name__}: {e}")
+            _db_update_status(config_id, "error", last_error=str(e))
         finally:
-            b.running = False
-            if b.stopped_at is None:
-                b.stopped_at = time.time()
-            if b.status != "error":
-                b.status = "stopped"
-            b.log("info", f"机器人已停止运行（最终状态: {b.status}）")
+            rt.running = False
+            # 若不是因为错误退出，标为 stopped
+            cur = _db_get(config_id)
+            if cur and cur.status != "error":
+                _db_update_status(config_id, "stopped", mark_stopped=True)
+            rt.log("info", "机器人已停止运行")
 
     # -------- helpers ----------
-    async def _interruptible_sleep(self, b: BotRunner, seconds: float) -> None:
+    async def _interruptible_sleep(self, rt: BotRuntime, seconds: float) -> None:
         """
         可被参数变更 / stop 打断的 sleep。
-        如果在此期间 params 变了，立刻返回 —— 这就是 B 方案"立即生效"的核心。
+        参数一变 → DB 写入完成后 rt.params_changed.set() → sleep 立即返回
+        → 下一轮 while 开头重新 SELECT params，用新参数跑。
         """
         if seconds <= 0:
             return
-        b._params_changed.clear()
+        rt.params_changed.clear()
         try:
-            await asyncio.wait_for(b._params_changed.wait(), timeout=seconds)
-            # 被提前唤醒 —— 参数变了或收到停止信号
+            await asyncio.wait_for(rt.params_changed.wait(), timeout=seconds)
         except asyncio.TimeoutError:
             pass
         finally:
-            b._params_changed.clear()
+            rt.params_changed.clear()
 
-    async def _startup_probe(self, b: BotRunner) -> Optional[float]:
-        """启动探活：取一次 ticker。失败则立刻把机器人标记成 error 并返回 None。"""
+    async def _startup_probe(self, rt: BotRuntime, symbol: str) -> Optional[float]:
         try:
-            t = await exchange.get_ticker(b.symbol)
+            t = await exchange.get_ticker(symbol)
             price = t["last"]
-            b.stats["last_price"] = price
-            b.status = "running"
-            b.consecutive_errors = 0
-            b.log("info", f"探活成功，当前 {b.symbol} = {price:.4f}")
+            rt.stats["last_price"] = price
+            rt.consecutive_errors = 0
+            _db_update_status(rt.config_id, "running")
+            rt.log("info", f"探活成功，当前 {symbol} = {price:.4f}")
             return price
         except Exception as e:
-            b.log("error", f"启动探活失败: {type(e).__name__}: {e}")
-            b.last_error = f"启动探活失败: {e}"
-            b.last_error_ts = time.time()
-            b.status = "error"
-            b.running = False
-            b.stopped_at = time.time()
+            rt.log("error", f"启动探活失败: {type(e).__name__}: {e}")
+            _db_update_status(
+                rt.config_id, "error",
+                last_error=f"启动探活失败: {e}",
+                mark_stopped=True,
+            )
+            rt.running = False
             return None
+
+    def _record_error(self, rt: BotRuntime, err: str) -> bool:
+        """记录错误；返回是否触发熔断停机。"""
+        rt.consecutive_errors += 1
+        rt.log("error", err)
+        _db_update_status(rt.config_id, "error", last_error=err)
+        return rt.consecutive_errors >= MAX_CONSECUTIVE_ERRORS
+
+    def _record_success(self, rt: BotRuntime) -> None:
+        if rt.consecutive_errors:
+            rt.consecutive_errors = 0
+            _db_update_status(rt.config_id, "running", last_error=None)
+        else:
+            # 不写库避免噪音；状态原本就是 running
+            pass
 
     @staticmethod
     def _qty_from_usdt(amount_usdt: float, price: float) -> float:
-        """USDT 金额换算为币种数量，保留 8 位精度。"""
+        """USDT 金额换算为币种数量（保留 8 位精度，支持 1 USDT 起步）。"""
         return round(amount_usdt / price, 8) if price > 0 else 0.0
 
     # =========================================================================
     # 策略 1：DCA
     # =========================================================================
-    async def _run_dca(self, b: BotRunner) -> None:
-        if await self._startup_probe(b) is None:
+    async def _run_dca(self, rt: BotRuntime, symbol: str) -> None:
+        if await self._startup_probe(rt, symbol) is None:
             return
 
-        while b.running:
-            # ★ 每轮重读参数（hot-reload 的关键）
-            amount_usdt = float(b.params["amount_usdt"])
-            interval_sec = int(b.params["interval_sec"])
+        while rt.running:
+            # ★ 每轮从 SQLite 读最新参数 —— 用户要求的"热编辑"核心
+            params = _db_read_params(rt.config_id)
+            if params is None:
+                rt.log("error", "数据库中配置已丢失，停机")
+                return
+            amount_usdt = float(params.get("amount_usdt", 0))
+            interval_sec = int(params.get("interval_sec", 60))
 
             try:
-                ticker = await exchange.get_ticker(b.symbol)
+                ticker = await exchange.get_ticker(symbol)
                 last = ticker["last"]
-                b.stats["last_price"] = last
+                rt.stats["last_price"] = last
 
                 qty = self._qty_from_usdt(amount_usdt, last)
                 if qty <= 0:
-                    b.record_error(f"估算数量过小: {qty}（金额 ${amount_usdt} / 价格 {last}）")
+                    self._record_error(rt, f"换算数量过小: {qty}（金额 {amount_usdt} / 价格 {last}）")
                 else:
                     await matching.place_order(
-                        symbol=b.symbol, side="buy", type_="market",
+                        symbol=symbol, side="buy", type_="market",
                         quantity=qty, price=None,
                     )
-                    b.stats["trades"] += 1
-                    b.stats["buys"] += 1
-                    b.stats["total_buy_qty"] += qty
-                    b.stats["total_spent"] += qty * last
-                    b.log(
+                    rt.stats["trades"] += 1
+                    rt.stats["buys"] += 1
+                    rt.stats["total_buy_qty"] += qty
+                    rt.stats["total_spent"] += qty * last
+                    rt.log(
                         "trade",
-                        f"定投买入 {qty} {b.symbol} @ {last:.4f} "
+                        f"定投买入 {qty} {symbol} @ {last:.4f} "
                         f"(花费 ${qty*last:.2f} / 目标 ${amount_usdt:.2f})",
                     )
-                    b.record_success()
+                    self._record_success(rt)
             except matching.MatchingError as e:
-                stopped = b.record_error(f"下单失败：{e}")
+                stopped = self._record_error(rt, f"下单失败：{e}")
                 if stopped:
-                    b.log("error", "连续错误过多，自动停机。请检查账户资金")
-                    b.running = False
+                    rt.log("error", "连续错误过多，自动停机。请检查账户资金")
+                    rt.running = False
                     return
             except exchange.ExchangeError as e:
-                b.record_error(f"行情获取失败：{e}")
+                self._record_error(rt, f"行情获取失败：{e}")
             except Exception as e:
-                b.record_error(f"未知错误：{type(e).__name__}: {e}")
+                self._record_error(rt, f"未知错误：{type(e).__name__}: {e}")
 
-            if not b.running:
+            if not rt.running:
                 return
-            await self._interruptible_sleep(b, interval_sec)
+            await self._interruptible_sleep(rt, interval_sec)
 
     # =========================================================================
     # 策略 2：Grid
     # =========================================================================
-    async def _run_grid(self, b: BotRunner) -> None:
-        ref = await self._startup_probe(b)
+    async def _run_grid(self, rt: BotRuntime, symbol: str) -> None:
+        ref = await self._startup_probe(rt, symbol)
         if ref is None:
             return
-        b.stats["reference_price"] = ref
-        b.log("info", f"网格初始参考价 = {ref:.4f}，等待价格波动触发…")
+        rt.stats["reference_price"] = ref
+        rt.log("info", f"网格初始参考价 = {ref:.4f}，等待价格波动触发…")
 
-        while b.running:
-            # ★ 每轮重读参数
-            amount_usdt = float(b.params["amount_usdt"])
-            drop_pct = float(b.params["drop_pct"]) / 100.0
-            rise_pct = float(b.params["rise_pct"]) / 100.0
-            poll_sec = int(b.params["poll_sec"])
+        while rt.running:
+            params = _db_read_params(rt.config_id)
+            if params is None:
+                rt.log("error", "数据库中配置已丢失，停机")
+                return
+            amount_usdt = float(params["amount_usdt"])
+            drop_pct = float(params["drop_pct"]) / 100.0
+            rise_pct = float(params["rise_pct"]) / 100.0
+            poll_sec = int(params["poll_sec"])
 
             try:
-                ticker = await exchange.get_ticker(b.symbol)
+                ticker = await exchange.get_ticker(symbol)
                 last = ticker["last"]
-                b.stats["last_price"] = last
+                rt.stats["last_price"] = last
 
                 buy_trigger = ref * (1 - drop_pct)
                 sell_trigger = ref * (1 + rise_pct)
@@ -512,101 +621,103 @@ class BotManager:
                     qty = self._qty_from_usdt(amount_usdt, last)
                     try:
                         await matching.place_order(
-                            symbol=b.symbol, side="buy", type_="market",
+                            symbol=symbol, side="buy", type_="market",
                             quantity=qty, price=None,
                         )
-                        b.stats["trades"] += 1
-                        b.stats["buys"] += 1
-                        b.stats["total_buy_qty"] += qty
-                        b.stats["total_spent"] += qty * last
-                        b.log(
+                        rt.stats["trades"] += 1
+                        rt.stats["buys"] += 1
+                        rt.stats["total_buy_qty"] += qty
+                        rt.stats["total_spent"] += qty * last
+                        rt.log(
                             "trade",
-                            f"⬇ 触发买入：{qty} {b.symbol} @ {last:.4f} "
+                            f"⬇ 触发买入：{qty} {symbol} @ {last:.4f} "
                             f"(参考 {ref:.4f}, 跌幅 {(ref-last)/ref*100:.2f}%, 花费 ${qty*last:.2f})",
                         )
                         ref = last
-                        b.stats["reference_price"] = ref
-                        b.record_success()
+                        rt.stats["reference_price"] = ref
+                        self._record_success(rt)
                     except matching.MatchingError as e:
-                        b.record_error(f"买入失败：{e}（参考价重置）")
+                        self._record_error(rt, f"买入失败：{e}（参考价重置）")
                         ref = last
-                        b.stats["reference_price"] = ref
+                        rt.stats["reference_price"] = ref
                 elif last >= sell_trigger:
                     qty = self._qty_from_usdt(amount_usdt, last)
                     try:
                         await matching.place_order(
-                            symbol=b.symbol, side="sell", type_="market",
+                            symbol=symbol, side="sell", type_="market",
                             quantity=qty, price=None,
                         )
-                        b.stats["trades"] += 1
-                        b.stats["sells"] += 1
-                        b.stats["total_sell_qty"] += qty
-                        b.stats["total_received"] += qty * last
-                        b.log(
+                        rt.stats["trades"] += 1
+                        rt.stats["sells"] += 1
+                        rt.stats["total_sell_qty"] += qty
+                        rt.stats["total_received"] += qty * last
+                        rt.log(
                             "trade",
-                            f"⬆ 触发卖出：{qty} {b.symbol} @ {last:.4f} "
+                            f"⬆ 触发卖出：{qty} {symbol} @ {last:.4f} "
                             f"(参考 {ref:.4f}, 涨幅 {(last-ref)/ref*100:.2f}%, 得 ${qty*last:.2f})",
                         )
                         ref = last
-                        b.stats["reference_price"] = ref
-                        b.record_success()
+                        rt.stats["reference_price"] = ref
+                        self._record_success(rt)
                     except matching.MatchingError as e:
-                        b.record_error(
-                            f"卖出失败：{e}（可能持仓不足，参考价已重置）"
+                        self._record_error(
+                            rt, f"卖出失败：{e}（可能持仓不足，参考价已重置）"
                         )
                         ref = last
-                        b.stats["reference_price"] = ref
+                        rt.stats["reference_price"] = ref
                 else:
-                    # 行情未触发也算一次"探活成功"，让红色状态回复到绿色
-                    b.record_success()
+                    self._record_success(rt)
             except exchange.ExchangeError as e:
-                stopped = b.record_error(f"行情失败：{e}")
+                stopped = self._record_error(rt, f"行情失败：{e}")
                 if stopped:
-                    b.running = False
+                    rt.running = False
                     return
             except Exception as e:
-                b.record_error(f"未知错误：{type(e).__name__}: {e}")
+                self._record_error(rt, f"未知错误：{type(e).__name__}: {e}")
 
-            if not b.running:
+            if not rt.running:
                 return
-            await self._interruptible_sleep(b, poll_sec)
+            await self._interruptible_sleep(rt, poll_sec)
 
     # =========================================================================
     # 策略 3：MA（双均线）
     # =========================================================================
-    async def _run_ma(self, b: BotRunner) -> None:
-        if await self._startup_probe(b) is None:
+    async def _run_ma(self, rt: BotRuntime, symbol: str) -> None:
+        if await self._startup_probe(rt, symbol) is None:
             return
 
-        prev_diff_sign: Optional[int] = None  # 上一轮 short - long 的正负号
-        b.log("info", "MA 策略已启动，等待金叉/死叉信号…")
+        prev_diff_sign: Optional[int] = None
+        rt.log("info", "双均线策略已启动，等待金叉/死叉信号…")
 
-        while b.running:
-            # ★ 每轮重读参数
-            amount_usdt = float(b.params["amount_usdt"])
-            ma_short = int(b.params["ma_short"])
-            ma_long = int(b.params["ma_long"])
-            kline_interval = str(b.params["kline_interval"])
-            poll_sec = int(b.params["poll_sec"])
+        while rt.running:
+            params = _db_read_params(rt.config_id)
+            if params is None:
+                rt.log("error", "数据库中配置已丢失，停机")
+                return
+            amount_usdt = float(params["amount_usdt"])
+            ma_short = int(params["ma_short"])
+            ma_long = int(params["ma_long"])
+            kline_interval = str(params["kline_interval"])
+            poll_sec = int(params["poll_sec"])
 
             try:
                 need = max(ma_long + 5, ma_short + 5)
-                candles = await exchange.get_kline(b.symbol, kline_interval, min(need, 300))
+                candles = await exchange.get_kline(symbol, kline_interval, min(need, 300))
                 if len(candles) < ma_long:
-                    b.record_error(
-                        f"K 线数据不足：{len(candles)} < {ma_long}，请缩短长周期或换周期"
+                    self._record_error(
+                        rt, f"K 线数据不足：{len(candles)} < {ma_long}"
                     )
-                    await self._interruptible_sleep(b, poll_sec)
+                    await self._interruptible_sleep(rt, poll_sec)
                     continue
 
                 closes = [c[4] for c in candles]
                 last = closes[-1]
-                b.stats["last_price"] = last
+                rt.stats["last_price"] = last
 
                 s_val = sum(closes[-ma_short:]) / ma_short
                 l_val = sum(closes[-ma_long:]) / ma_long
-                b.stats["ma_short"] = s_val
-                b.stats["ma_long"] = l_val
+                rt.stats["ma_short"] = s_val
+                rt.stats["ma_long"] = l_val
 
                 diff = s_val - l_val
                 cur_sign = 1 if diff > 0 else (-1 if diff < 0 else 0)
@@ -619,56 +730,55 @@ class BotManager:
                     qty = self._qty_from_usdt(amount_usdt, last)
                     try:
                         await matching.place_order(
-                            symbol=b.symbol, side="buy", type_="market",
+                            symbol=symbol, side="buy", type_="market",
                             quantity=qty, price=None,
                         )
-                        b.stats["trades"] += 1
-                        b.stats["buys"] += 1
-                        b.stats["total_buy_qty"] += qty
-                        b.stats["total_spent"] += qty * last
-                        b.log(
+                        rt.stats["trades"] += 1
+                        rt.stats["buys"] += 1
+                        rt.stats["total_buy_qty"] += qty
+                        rt.stats["total_spent"] += qty * last
+                        rt.log(
                             "trade",
-                            f"🌟 金叉买入 {qty} {b.symbol} @ {last:.4f} "
+                            f"🌟 金叉买入 {qty} {symbol} @ {last:.4f} "
                             f"(MA{ma_short}={s_val:.4f} 上穿 MA{ma_long}={l_val:.4f})"
                         )
-                        b.record_success()
+                        self._record_success(rt)
                     except matching.MatchingError as e:
-                        b.record_error(f"金叉买入失败：{e}")
+                        self._record_error(rt, f"金叉买入失败：{e}")
                 elif signal == "death":
-                    # 卖出量 = 相同 USDT 等价的数量；不足时在 matching 层会报错
                     qty = self._qty_from_usdt(amount_usdt, last)
                     try:
                         await matching.place_order(
-                            symbol=b.symbol, side="sell", type_="market",
+                            symbol=symbol, side="sell", type_="market",
                             quantity=qty, price=None,
                         )
-                        b.stats["trades"] += 1
-                        b.stats["sells"] += 1
-                        b.stats["total_sell_qty"] += qty
-                        b.stats["total_received"] += qty * last
-                        b.log(
+                        rt.stats["trades"] += 1
+                        rt.stats["sells"] += 1
+                        rt.stats["total_sell_qty"] += qty
+                        rt.stats["total_received"] += qty * last
+                        rt.log(
                             "trade",
-                            f"💀 死叉卖出 {qty} {b.symbol} @ {last:.4f} "
+                            f"💀 死叉卖出 {qty} {symbol} @ {last:.4f} "
                             f"(MA{ma_short}={s_val:.4f} 下穿 MA{ma_long}={l_val:.4f})"
                         )
-                        b.record_success()
+                        self._record_success(rt)
                     except matching.MatchingError as e:
-                        b.record_error(f"死叉卖出失败（可能持仓不足）：{e}")
+                        self._record_error(rt, f"死叉卖出失败（可能持仓不足）：{e}")
                 else:
-                    b.record_success()
+                    self._record_success(rt)
 
                 prev_diff_sign = cur_sign
             except exchange.ExchangeError as e:
-                stopped = b.record_error(f"行情失败：{e}")
+                stopped = self._record_error(rt, f"行情失败：{e}")
                 if stopped:
-                    b.running = False
+                    rt.running = False
                     return
             except Exception as e:
-                b.record_error(f"未知错误：{type(e).__name__}: {e}")
+                self._record_error(rt, f"未知错误：{type(e).__name__}: {e}")
 
-            if not b.running:
+            if not rt.running:
                 return
-            await self._interruptible_sleep(b, poll_sec)
+            await self._interruptible_sleep(rt, poll_sec)
 
 
 bot_manager = BotManager()

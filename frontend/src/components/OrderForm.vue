@@ -223,19 +223,26 @@ const percents = [0.25, 0.5, 0.75, 1]
                 <span class="muted">
                   (约价值 <b>{{ fmt(heldValueUsdt) }} USDT</b>)
                 </span>
+                <span class="accent-tag">最大可卖</span>
               </template>
             </span>
           </div>
         </template>
         <el-input-number
           v-model="amountUsdt"
-          :min="0"
-          :step="10"
+          :min="1"
+          :step="1"
           :precision="2"
           style="width:100%"
         />
         <div class="convert-hint">
-          ≈ <b>{{ fmt(estimatedQty, 8) }}</b> {{ baseCoin }}
+          <template v-if="side === 'buy'">
+            ≈ 预计获得 <b>{{ fmt(estimatedQty, 8) }}</b> {{ baseCoin }}
+          </template>
+          <template v-else>
+            预估获得 <b class="accent-strong">{{ fmt(amountUsdt, 2) }}</b> USDT
+            （卖出 <b>{{ fmt(estimatedQty, 8) }}</b> {{ baseCoin }}）
+          </template>
           <span class="muted">
             · 换算价
             {{ type === 'limit' ? '(限价)' : '(市价)' }}:
@@ -303,6 +310,11 @@ const percents = [0.25, 0.5, 0.75, 1]
   color: var(--text-sub);
 }
 .convert-hint b { color: var(--accent); font-family: 'JetBrains Mono', monospace; }
+.convert-hint b.accent-strong {
+  color: var(--up);
+  font-size: 14px;
+  font-weight: 700;
+}
 
 .percent-row {
   display: grid;

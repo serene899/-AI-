@@ -5,6 +5,7 @@ SQLite + SQLModel 持久化层。
 - position   : 持仓（按 symbol 汇总，含均价）
 - order      : 挂单 / 成交 / 撤单
 - trade      : 成交流水
+- bot_config : 自动交易机器人配置（参数落盘，支持热编辑 + 重启后可查）
 """
 from datetime import datetime
 from typing import Optional
@@ -51,6 +52,24 @@ class Trade(SQLModel, table=True):
     quantity: float
     price: float
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class BotConfig(SQLModel, table=True):
+    """
+    自动交易机器人配置（策略参数持久化）。
+    - params_json: 策略参数字典的 JSON 字符串（SQLite 没有原生 JSON 列，存字符串即可）
+    - status:      initializing | running | error | stopped
+    - 策略循环每轮都会 SELECT 当前行拿最新的 params_json，实现"热编辑"
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    strategy: str = Field(index=True)           # dca | grid | ma
+    symbol: str = Field(index=True)
+    params_json: str                            # JSON 字符串
+    status: str = Field(default="initializing", index=True)
+    last_error: Optional[str] = None
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    stopped_at: Optional[datetime] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 # ---------- Engine ----------
