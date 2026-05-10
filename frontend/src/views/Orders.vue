@@ -131,6 +131,7 @@ onUnmounted(() => {
         <el-table-column label="数量" :formatter="(r: any) => fmt(r.quantity, 6)" />
         <el-table-column label="成交价" :formatter="(r: any) => fmt(r.price, 4)" />
         <el-table-column label="成交金额" :formatter="(r: any) => '$' + fmt(r.quantity * r.price, 2)" />
+        <el-table-column label="手续费" :formatter="(r: any) => '$' + fmt(r.fee ?? 0, 4)" />
         <el-table-column label="成交时间" :formatter="(r: any) => fmtTime(r.created_at)" />
       </el-table>
     </div>

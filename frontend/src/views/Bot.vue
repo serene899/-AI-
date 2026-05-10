@@ -336,6 +336,22 @@ function paramSummary(b: Bot): string {
     .join(' · ')
 }
 
+/** 风控字段集合（后端 RISK_FIELDS 的 name 列表） */
+const RISK_FIELD_NAMES = new Set([
+  'stop_loss_pct',
+  'take_profit_pct',
+  'max_drawdown_pct',
+  'max_loss_usdt',
+])
+function isRiskField(name: string): boolean {
+  return RISK_FIELD_NAMES.has(name)
+}
+/** 表单里第一个风控字段的 name —— 渲染"风控分组标题"时用 */
+const firstRiskFieldName = computed(() => {
+  const fields = currentStrategy.value?.fields ?? []
+  return fields.find((f) => isRiskField(f.name))?.name ?? null
+})
+
 // ========== 生命周期 ==========
 let refreshTimer: number | undefined
 let logTimer: number | undefined
@@ -377,33 +393,46 @@ onUnmounted(() => {
             <el-option v-for="s in store.symbols" :key="s" :label="s" :value="s" />
           </el-select>
         </el-form-item>
-        <el-form-item
+        <template
           v-for="f in currentStrategy?.fields"
           :key="f.name"
-          :label="f.label + (f.hot ? ' ♨' : '')"
         >
-          <el-select
-            v-if="f.type === 'select'"
-            v-model="form.params[f.name]"
-            style="width:180px"
+          <!-- 在第一个风控字段前插入分组标题（占整行） -->
+          <div
+            v-if="f.name === firstRiskFieldName"
+            class="risk-section-header"
           >
-            <el-option
-              v-for="opt in f.options ?? []"
-              :key="opt"
-              :label="opt"
-              :value="opt"
+            <span class="risk-section-icon">🛡️</span>
+            <span class="risk-section-title">风险控制</span>
+            <span class="risk-section-hint">所有保护默认为 0（关闭）。设置非 0 值后，机器人会在命中条件时自动停机。</span>
+          </div>
+          <el-form-item
+            :label="f.label + (f.hot ? ' ♨' : '')"
+            :class="{ 'is-risk-field': isRiskField(f.name) }"
+          >
+            <el-select
+              v-if="f.type === 'select'"
+              v-model="form.params[f.name]"
+              style="width:180px"
+            >
+              <el-option
+                v-for="opt in f.options ?? []"
+                :key="opt"
+                :label="opt"
+                :value="opt"
+              />
+            </el-select>
+            <el-input-number
+              v-else
+              v-model="(form.params[f.name] as number)"
+              :min="f.min ?? 0"
+              :max="f.max"
+              :step="Number(f.default) > 10 ? 10 : 0.1"
+              :precision="6"
+              style="width:180px"
             />
-          </el-select>
-          <el-input-number
-            v-else
-            v-model="(form.params[f.name] as number)"
-            :min="f.min ?? 0"
-            :max="f.max"
-            :step="Number(f.default) > 10 ? 10 : 0.1"
-            :precision="6"
-            style="width:180px"
-          />
-        </el-form-item>
+          </el-form-item>
+        </template>
         <el-form-item label=" " style="align-self:flex-end">
           <el-button type="primary" :loading="submitting" @click="onStart">
             启动机器人
@@ -637,24 +666,35 @@ onUnmounted(() => {
         仅 ♨ 标记字段可热修改；交易币种和策略类型需要停止后重建。
       </div>
       <el-form v-if="editingBot" label-position="top">
-        <el-form-item
+        <template
           v-for="f in hotFieldsOf(editingBot.strategy)"
           :key="f.name"
-          :label="f.label"
         >
-          <el-select v-if="f.type === 'select'" v-model="editForm[f.name]" style="width:100%">
-            <el-option v-for="opt in f.options ?? []" :key="opt" :label="opt" :value="opt" />
-          </el-select>
-          <el-input-number
-            v-else
-            v-model="(editForm[f.name] as number)"
-            :min="f.min ?? 0"
-            :max="f.max"
-            :step="Number(f.default) > 10 ? 10 : 0.1"
-            :precision="6"
-            style="width:100%"
-          />
-        </el-form-item>
+          <div
+            v-if="f.name === 'stop_loss_pct'"
+            class="risk-section-header risk-section-header--dialog"
+          >
+            <span class="risk-section-icon">🛡️</span>
+            <span class="risk-section-title">风险控制</span>
+          </div>
+          <el-form-item
+            :label="f.label"
+            :class="{ 'is-risk-field': isRiskField(f.name) }"
+          >
+            <el-select v-if="f.type === 'select'" v-model="editForm[f.name]" style="width:100%">
+              <el-option v-for="opt in f.options ?? []" :key="opt" :label="opt" :value="opt" />
+            </el-select>
+            <el-input-number
+              v-else
+              v-model="(editForm[f.name] as number)"
+              :min="f.min ?? 0"
+              :max="f.max"
+              :step="Number(f.default) > 10 ? 10 : 0.1"
+              :precision="6"
+              style="width:100%"
+            />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="editDialogOpen = false">取消</el-button>
@@ -852,4 +892,47 @@ onUnmounted(() => {
 .log-line.error .log-tag { color: var(--down); }
 .log-msg { flex: 1; word-break: break-all; }
 .log-empty { padding: 8px; text-align: center; }
+
+/* ========== 风险控制字段分组 ========== */
+.risk-section-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 10px;
+  padding: 8px 12px;
+  background: var(--warn-soft);
+  border: 1px solid rgba(255, 159, 10, 0.25);
+  border-radius: 10px;
+}
+.risk-section-header--dialog {
+  margin-top: 8px;
+}
+.risk-section-icon {
+  font-size: 14px;
+}
+.risk-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--warn);
+  letter-spacing: -0.01em;
+}
+.risk-section-hint {
+  font-size: 11px;
+  color: var(--text-sub);
+  margin-left: auto;
+  line-height: 1.5;
+}
+@media (max-width: 900px) {
+  .risk-section-hint { display: none; }
+}
+/* 让风控字段在浅黄背景上显得柔和一点 */
+:deep(.is-risk-field) .el-input-number,
+:deep(.is-risk-field) .el-select {
+  max-width: 200px;
+}
+:deep(.is-risk-field) .el-form-item__label {
+  color: var(--warn) !important;
+  font-size: 12px !important;
+}
 </style>

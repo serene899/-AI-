@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     # Account
     INITIAL_CAPITAL: float = 10000.0
 
+    # 模拟交易成本（贴近真实盘口）
+    # 手续费率：默认 0.1%（类似币安/OKX 现货 maker/taker 的中位数）
+    FEE_RATE: float = 0.001
+    # 市价单滑点：成交价在当前价基础上 ±SLIPPAGE_PCT（买高卖低）
+    # 默认 0.05%；限价单不应用滑点（用户已经指定价格）
+    SLIPPAGE_PCT: float = 0.0005
+
     # DB
     DB_PATH: str = "./data.db"
 

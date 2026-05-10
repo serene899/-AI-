@@ -44,6 +44,22 @@ MAX_LOG_ENTRIES = 200
 
 
 # =============================================================================
+# 通用风控字段 —— 所有策略共享，保持用户体验一致
+# =============================================================================
+# 所有风控字段默认值为 0，表示"关闭该项保护"。避免老机器人被误触发。
+RISK_FIELDS = [
+    {"name": "stop_loss_pct", "label": "止损百分比 (% · 0=关闭)",
+     "type": "number", "default": 0, "min": 0, "max": 100, "hot": True},
+    {"name": "take_profit_pct", "label": "止盈百分比 (% · 0=关闭)",
+     "type": "number", "default": 0, "min": 0, "max": 1000, "hot": True},
+    {"name": "max_drawdown_pct", "label": "最大回撤 (% · 0=关闭)",
+     "type": "number", "default": 0, "min": 0, "max": 100, "hot": True},
+    {"name": "max_loss_usdt", "label": "单机器人最大亏损 (USDT · 0=关闭)",
+     "type": "number", "default": 0, "min": 0, "hot": True},
+]
+
+
+# =============================================================================
 # 策略元信息（前端拿去动态生成表单）
 # =============================================================================
 STRATEGY_DEFS = [
@@ -95,6 +111,10 @@ STRATEGY_DEFS = [
 
 STRATEGY_KEYS = {s["key"] for s in STRATEGY_DEFS}
 
+# 把通用风控字段追加到每个策略的字段末尾（所有策略共享一份表单结构）
+for _s in STRATEGY_DEFS:
+    _s["fields"] = _s["fields"] + RISK_FIELDS
+
 
 # =============================================================================
 # 运行时数据（只放"不该持久化"的东西：任务句柄、日志环、唤醒事件、统计）
@@ -112,6 +132,10 @@ class BotRuntime:
     config_id: int
     running: bool = True
     consecutive_errors: int = 0
+    # 风控：历史最高盈亏（用于最大回撤计算）
+    peak_pnl: float = 0.0
+    # 风控：初始持仓均价（已有持仓的快照，用于止损止盈按"持仓浮亏/浮盈"计算）
+    # 注：止损/止盈基于"每次加仓后"的新均价，所以每次 _apply_fill 之后不需要额外维护
 
     stats: dict = field(default_factory=lambda: {
         "trades": 0, "buys": 0, "sells": 0,
@@ -446,12 +470,49 @@ class BotManager:
 
     def _validate(self, strategy: str, p: dict) -> dict:
         if strategy == "dca":
-            return self._validate_dca(p)
-        if strategy == "grid":
-            return self._validate_grid(p)
-        if strategy == "ma":
-            return self._validate_ma(p)
-        raise ValueError(f"未知策略: {strategy}")
+            out = self._validate_dca(p)
+        elif strategy == "grid":
+            out = self._validate_grid(p)
+        elif strategy == "ma":
+            out = self._validate_ma(p)
+        else:
+            raise ValueError(f"未知策略: {strategy}")
+        # 合入通用风控字段（校验后一并返回）
+        out.update(self._validate_risk(p))
+        return out
+
+    @staticmethod
+    def _validate_risk(p: dict) -> dict:
+        """
+        所有策略共享的风控字段。0 表示关闭。
+        缺失的字段视为 0（向后兼容老机器人的 params_json）。
+        """
+        def _num(key: str, default: float = 0.0) -> float:
+            try:
+                return float(p.get(key, default) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        stop_loss = _num("stop_loss_pct")
+        take_profit = _num("take_profit_pct")
+        max_dd = _num("max_drawdown_pct")
+        max_loss = _num("max_loss_usdt")
+
+        if not (0 <= stop_loss <= 100):
+            raise ValueError("止损百分比必须在 0 ~ 100 之间（0 = 关闭）")
+        if not (0 <= take_profit <= 1000):
+            raise ValueError("止盈百分比必须在 0 ~ 1000 之间（0 = 关闭）")
+        if not (0 <= max_dd <= 100):
+            raise ValueError("最大回撤百分比必须在 0 ~ 100 之间（0 = 关闭）")
+        if max_loss < 0:
+            raise ValueError("最大亏损金额不能为负")
+
+        return {
+            "stop_loss_pct": stop_loss,
+            "take_profit_pct": take_profit,
+            "max_drawdown_pct": max_dd,
+            "max_loss_usdt": max_loss,
+        }
 
     @staticmethod
     def _validate_dca(p: dict) -> dict:
@@ -597,6 +658,88 @@ class BotManager:
         return round(amount_usdt / price, 8) if price > 0 else 0.0
 
     # =========================================================================
+    # 风控检查 —— 每轮策略循环开头调用
+    # =========================================================================
+    def _check_risk_limits(self, rt: BotRuntime, params: dict) -> bool:
+        """
+        评估止损/止盈/最大回撤/最大亏损金额。
+        命中任一规则 → 记录日志 + 标记 stopped + 返回 True（策略循环据此退出）。
+        未命中返回 False。
+        所有阈值为 0 时表示该项"关闭"，不做检查。
+        """
+        stop_loss_pct = float(params.get("stop_loss_pct", 0) or 0)
+        take_profit_pct = float(params.get("take_profit_pct", 0) or 0)
+        max_dd_pct = float(params.get("max_drawdown_pct", 0) or 0)
+        max_loss_usdt = float(params.get("max_loss_usdt", 0) or 0)
+
+        # 早退：四个保护都是关闭的，免去下面的算数
+        if stop_loss_pct <= 0 and take_profit_pct <= 0 and max_dd_pct <= 0 and max_loss_usdt <= 0:
+            return False
+
+        pnl = _compute_strategy_pnl(rt.stats)
+        spent = float(rt.stats.get("total_spent") or 0)
+
+        # 跟踪历史最高盈亏（用于回撤）
+        if pnl > rt.peak_pnl:
+            rt.peak_pnl = pnl
+
+        # --- 止损：亏损比例达到阈值就停 ---
+        # 基准：已花费的本金（spent），避免策略刚开始 spent=0 时误触发
+        if stop_loss_pct > 0 and spent > 1:
+            loss_pct = (-pnl / spent) * 100 if pnl < 0 else 0.0
+            if loss_pct >= stop_loss_pct:
+                self._trigger_risk_stop(
+                    rt,
+                    f"🛑 止损触发：当前亏损 {loss_pct:.2f}% ≥ 阈值 {stop_loss_pct:.2f}%"
+                    f"（已花费 ${spent:.2f}，策略盈亏 ${pnl:.2f}）"
+                )
+                return True
+
+        # --- 止盈：盈利比例达到阈值就停（锁定利润） ---
+        if take_profit_pct > 0 and spent > 1 and pnl > 0:
+            gain_pct = (pnl / spent) * 100
+            if gain_pct >= take_profit_pct:
+                self._trigger_risk_stop(
+                    rt,
+                    f"🎯 止盈触发：当前盈利 {gain_pct:.2f}% ≥ 阈值 {take_profit_pct:.2f}%"
+                    f"（已花费 ${spent:.2f}，策略盈亏 ${pnl:.2f}）"
+                )
+                return True
+
+        # --- 最大回撤：从峰值盈亏回落达到阈值就停 ---
+        # 只有盈亏曾经为正过（peak_pnl > 0）才有"回撤"的意义
+        if max_dd_pct > 0 and rt.peak_pnl > 1:
+            drawdown_pct = ((rt.peak_pnl - pnl) / rt.peak_pnl) * 100
+            if drawdown_pct >= max_dd_pct:
+                self._trigger_risk_stop(
+                    rt,
+                    f"📉 最大回撤触发：从峰值 ${rt.peak_pnl:.2f} 回落到 ${pnl:.2f}"
+                    f"（回撤 {drawdown_pct:.2f}% ≥ 阈值 {max_dd_pct:.2f}%）"
+                )
+                return True
+
+        # --- 最大亏损金额（绝对值） ---
+        if max_loss_usdt > 0 and pnl <= -max_loss_usdt:
+            self._trigger_risk_stop(
+                rt,
+                f"💸 最大亏损触发：策略盈亏 ${pnl:.2f} 已亏超 ${max_loss_usdt:.2f}"
+            )
+            return True
+
+        return False
+
+    def _trigger_risk_stop(self, rt: BotRuntime, reason: str) -> None:
+        """统一处理风控触发的停机：写日志 + DB 标记 stopped + 停机。"""
+        rt.log("error", reason)
+        rt.log("info", "机器人已被风控系统自动停机，请检查账户")
+        rt.running = False
+        _db_update_status(
+            rt.config_id, "stopped",
+            last_error=reason,
+            mark_stopped=True,
+        )
+
+    # =========================================================================
     # 策略 1：DCA
     # =========================================================================
     async def _run_dca(self, rt: BotRuntime, symbol: str) -> None:
@@ -608,6 +751,9 @@ class BotManager:
             params = _db_read_params(rt.config_id)
             if params is None:
                 rt.log("error", "数据库中配置已丢失，停机")
+                return
+            # ★ 每轮先做风控检查，命中就停机
+            if self._check_risk_limits(rt, params):
                 return
             amount_usdt = float(params.get("amount_usdt", 0))
             interval_sec = int(params.get("interval_sec", 60))
@@ -664,6 +810,9 @@ class BotManager:
             params = _db_read_params(rt.config_id)
             if params is None:
                 rt.log("error", "数据库中配置已丢失，停机")
+                return
+            # ★ 风控检查
+            if self._check_risk_limits(rt, params):
                 return
             amount_usdt = float(params["amount_usdt"])
             drop_pct = float(params["drop_pct"]) / 100.0
@@ -754,6 +903,9 @@ class BotManager:
             params = _db_read_params(rt.config_id)
             if params is None:
                 rt.log("error", "数据库中配置已丢失，停机")
+                return
+            # ★ 风控检查
+            if self._check_risk_limits(rt, params):
                 return
             amount_usdt = float(params["amount_usdt"])
             ma_short = int(params["ma_short"])

@@ -54,7 +54,23 @@ class Trade(SQLModel, table=True):
     side: str
     quantity: float
     price: float
+    # 成交手续费（USDT），已从账户现金中扣除/少收。可能为 0（老数据 / 手续费率为 0）
+    fee: float = Field(default=0.0)
     created_at: datetime = Field(default_factory=now_cn)
+
+
+class EquitySnapshot(SQLModel, table=True):
+    """
+    账户净值快照 —— 每分钟由后台任务写入一次。
+    用于前端绘制"资产随时间变化"折线图（类比 Apple Stocks）。
+    注：保留所有点，不做清理；按一年 525600 条 × 约 80 B/行 ≈ 42 MB，可接受。
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    ts: datetime = Field(default_factory=now_cn, index=True)
+    total_equity: float
+    cash: float
+    position_value: float
+    unrealized_pnl: float
 
 
 class BotConfig(SQLModel, table=True):
@@ -92,8 +108,10 @@ def get_session() -> Session:
 
 
 def init_db() -> None:
-    """首次启动建表 + 初始化账户。"""
+    """首次启动建表 + 初始化账户 + 轻量迁移。"""
     SQLModel.metadata.create_all(_engine)
+    # 轻量迁移：给老数据库补上新字段（SQLite ALTER TABLE 支持 ADD COLUMN）
+    _migrate_add_column_if_missing("trade", "fee", "REAL DEFAULT 0.0")
     with Session(_engine) as session:
         acc = session.exec(select(Account).where(Account.id == 1)).first()
         if acc is None:
@@ -104,3 +122,14 @@ def init_db() -> None:
             )
             session.add(acc)
             session.commit()
+
+
+def _migrate_add_column_if_missing(table: str, column: str, sql_type: str) -> None:
+    """幂等地给已存在的表补字段；不存在就加，存在就跳过。"""
+    from sqlalchemy import text
+    with _engine.begin() as conn:
+        rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+        existing = {r[1] for r in rows}  # row[1] = column name
+        if column in existing:
+            return
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))

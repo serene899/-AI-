@@ -78,6 +78,24 @@ export interface AccountSnapshot {
   positions: Position[]
 }
 
+// 资产净值曲线 —— 供 Dashboard 折线图使用
+export interface EquityPoint {
+  ts: string
+  equity: number
+  cash: number
+  position_value: number
+  unrealized_pnl: number
+}
+export interface EquityCurve {
+  range: string          // 1H | 1D | 1W | 1M | ALL
+  points: EquityPoint[]
+  first: number
+  last: number
+  change: number
+  change_pct: number
+}
+export type EquityRange = '1H' | '1D' | '1W' | '1M' | 'ALL'
+
 export interface Order {
   id: number
   symbol: string
@@ -98,6 +116,7 @@ export interface Trade {
   side: 'buy' | 'sell'
   quantity: number
   price: number
+  fee?: number
   created_at: string
 }
 
@@ -181,6 +200,10 @@ export const api = {
   account: () => http.get<any, AccountSnapshot>('/api/v1/account'),
   resetAccount: (initial_capital: number) =>
     http.post<any, AccountSnapshot>('/api/v1/account/reset', { initial_capital }),
+
+  // 资产净值曲线（Dashboard 折线图）
+  equityCurve: (range: EquityRange = '1D') =>
+    http.get<any, EquityCurve>('/api/v1/account/equity', { params: { range } }),
 
   createOrder: (body: {
     symbol: string

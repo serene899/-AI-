@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api, { type Bot } from '@/api'
 import { useAppStore } from '@/store/app'
+import EquityCurveChart from '@/components/EquityCurveChart.vue'
 
 const store = useAppStore()
 const loading = ref(false)
@@ -109,6 +110,11 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+
+    <div style="height:24px" />
+
+    <!-- 资产净值曲线（Apple Stocks 风格） -->
+    <EquityCurveChart />
 
     <div style="height:24px" />
 

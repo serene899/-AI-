@@ -15,6 +15,7 @@ from app.api import account, bot, health, market, trade
 from app.config import settings
 from app.models.db import init_db
 from app.services.matching import limit_order_worker
+from app.services.portfolio import equity_snapshot_worker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("cryptosim")
@@ -49,6 +50,9 @@ async def on_startup():
     init_db()
     log.info("Starting limit-order matching worker ...")
     asyncio.create_task(limit_order_worker(interval_sec=2.0))
+
+    log.info("Starting equity-snapshot worker (every 60s) ...")
+    asyncio.create_task(equity_snapshot_worker(interval_sec=60))
 
     # ★ 关键：从 SQLite 恢复运行中的机器人（重启 / 刷新都不丢）
     from app.services.bot import bot_manager

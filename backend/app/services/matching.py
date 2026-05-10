@@ -1,16 +1,23 @@
 """
 模拟撮合引擎。
-- 市价单：立即以当前 ticker 成交
+- 市价单：立即以当前 ticker 成交（施加滑点，贴近真实盘口）
 - 限价单：开单进入 open；由后台轮询任务按最新价判定成交
-成交逻辑：
-  buy  limit: last_price <= order.price → 成交
-  sell limit: last_price >= order.price → 成交
+  · buy  limit: last_price <= order.price → 成交
+  · sell limit: last_price >= order.price → 成交
+
+成交成本模型：
+- 手续费 (settings.FEE_RATE)：
+  · 买入：现金扣 (qty * fill_price) + fee；持仓均价按"含费成本"摊薄
+  · 卖出：现金加 (qty * fill_price) - fee；实现收益少一点
+- 滑点 (settings.SLIPPAGE_PCT)：
+  · 只对"市价"方向施加（买高卖低）；限价单用户自己定价，不动
 """
 import asyncio
 from typing import Optional
 
 from sqlmodel import Session, select
 
+from app.config import settings
 from app.core.time import iso_cn, now_cn
 from app.models.db import Account, Order, Position, Trade, get_session
 from app.services import exchange
@@ -20,30 +27,53 @@ class MatchingError(Exception):
     pass
 
 
+def _apply_slippage(price: float, side: str) -> float:
+    """市价单滑点：买高 / 卖低。限价单调用处不走这里。"""
+    pct = settings.SLIPPAGE_PCT
+    if pct <= 0:
+        return price
+    return price * (1 + pct) if side == "buy" else price * (1 - pct)
+
+
+def _fee_of(notional: float) -> float:
+    """按成交金额计算手续费（USDT）。"""
+    rate = settings.FEE_RATE
+    return max(notional * rate, 0.0) if rate > 0 else 0.0
+
+
 # ---------- 核心撮合 ----------
 def _apply_fill(
     session: Session,
     order: Order,
     fill_price: float,
 ) -> None:
-    """成交后更新账户、持仓、订单、流水。调用前需自行保证资金/持仓充足。"""
+    """
+    成交后更新账户、持仓、订单、流水。调用前需自行保证资金/持仓充足。
+    fill_price 已是"考虑过滑点"的最终成交价。
+    """
     acc = session.exec(select(Account).where(Account.id == 1)).first()
     pos = session.exec(select(Position).where(Position.symbol == order.symbol)).first()
 
-    cost = order.quantity * fill_price
+    notional = order.quantity * fill_price
+    fee = _fee_of(notional)
 
     if order.side == "buy":
-        acc.cash -= cost
+        # 现金扣：成交金额 + 手续费
+        acc.cash -= (notional + fee)
+        # 持仓均价按"含费成本"计算，这样浮动盈亏更贴近真实
+        cost_with_fee = notional + fee
         if pos is None:
-            pos = Position(symbol=order.symbol, quantity=order.quantity, avg_price=fill_price)
+            new_avg = cost_with_fee / order.quantity if order.quantity > 0 else fill_price
+            pos = Position(symbol=order.symbol, quantity=order.quantity, avg_price=new_avg)
             session.add(pos)
         else:
             total_qty = pos.quantity + order.quantity
-            pos.avg_price = (pos.avg_price * pos.quantity + cost) / total_qty
+            pos.avg_price = (pos.avg_price * pos.quantity + cost_with_fee) / total_qty
             pos.quantity = total_qty
             pos.updated_at = now_cn()
     else:  # sell
-        acc.cash += cost
+        # 现金加：成交金额 - 手续费
+        acc.cash += (notional - fee)
         if pos is None or pos.quantity < order.quantity:
             raise MatchingError("持仓不足")
         pos.quantity -= order.quantity
@@ -60,6 +90,7 @@ def _apply_fill(
         side=order.side,
         quantity=order.quantity,
         price=fill_price,
+        fee=fee,
     )
     session.add(trade)
     session.add(acc)
@@ -127,12 +158,19 @@ async def place_order(
         session.refresh(order)
 
         if type_ == "market":
-            # 资金/持仓预检
-            if side == "buy" and acc.cash < quantity * last_price:
-                order.status = "cancelled"
-                session.add(order)
-                session.commit()
-                raise MatchingError("现金余额不足")
+            # 市价单：施加滑点得到实际成交价
+            fill_price = _apply_slippage(last_price, side)
+            # 资金/持仓预检（买入需含手续费）
+            if side == "buy":
+                est_cost = quantity * fill_price
+                est_fee = _fee_of(est_cost)
+                if acc.cash < est_cost + est_fee:
+                    order.status = "cancelled"
+                    session.add(order)
+                    session.commit()
+                    raise MatchingError(
+                        f"现金余额不足（需 ${est_cost + est_fee:.2f}，含手续费 ${est_fee:.4f}）"
+                    )
             if side == "sell":
                 pos = session.exec(
                     select(Position).where(Position.symbol == symbol)
@@ -142,17 +180,22 @@ async def place_order(
                     session.add(order)
                     session.commit()
                     raise MatchingError("持仓不足")
-            _apply_fill(session, order, last_price)
+            _apply_fill(session, order, fill_price)
             session.commit()
             session.refresh(order)
 
         else:  # limit
-            # 买入限价需冻结现金（简化：仅做预检，不真正冻结）
-            if side == "buy" and acc.cash < quantity * price:
-                order.status = "cancelled"
-                session.add(order)
-                session.commit()
-                raise MatchingError("现金余额不足")
+            # 限价单：用户指定价格，不施加滑点
+            if side == "buy":
+                est_cost = quantity * price
+                est_fee = _fee_of(est_cost)
+                if acc.cash < est_cost + est_fee:
+                    order.status = "cancelled"
+                    session.add(order)
+                    session.commit()
+                    raise MatchingError(
+                        f"现金余额不足（需 ${est_cost + est_fee:.2f}，含手续费 ${est_fee:.4f}）"
+                    )
             if side == "sell":
                 pos = session.exec(
                     select(Position).where(Position.symbol == symbol)
@@ -202,6 +245,7 @@ def list_trades(limit: int = 200) -> list[dict]:
                 "side": t.side,
                 "quantity": t.quantity,
                 "price": t.price,
+                "fee": t.fee or 0.0,
                 "created_at": iso_cn(t.created_at),
             }
             for t in trades
@@ -271,12 +315,15 @@ async def _scan_and_fill_once() -> None:
                 continue
 
             try:
-                # 成交前再校验一次资金/持仓
+                # 成交前再校验一次资金/持仓（买入含手续费）
                 acc = session.exec(select(Account).where(Account.id == 1)).first()
-                if order.side == "buy" and acc.cash < order.quantity * order.price:
-                    order.status = "cancelled"
-                    session.add(order)
-                    continue
+                if order.side == "buy":
+                    est_cost = order.quantity * order.price
+                    est_fee = _fee_of(est_cost)
+                    if acc.cash < est_cost + est_fee:
+                        order.status = "cancelled"
+                        session.add(order)
+                        continue
                 if order.side == "sell":
                     pos = session.exec(
                         select(Position).where(Position.symbol == order.symbol)
