@@ -111,14 +111,54 @@ html.dark {
   letter-spacing: -0.01em;
   transition: all 0.2s ease;
 }
-.el-button--primary {
+/* Primary 实心按钮：蓝底白字 */
+.el-button--primary:not(.is-plain):not(.is-text):not(.is-link) {
   background: var(--accent) !important;
   border-color: var(--accent) !important;
+  color: #fff !important;
 }
-.el-button--primary:hover {
+.el-button--primary:not(.is-plain):not(.is-text):not(.is-link):hover,
+.el-button--primary:not(.is-plain):not(.is-text):not(.is-link):focus {
   background: var(--accent-hover) !important;
   border-color: var(--accent-hover) !important;
+  color: #fff !important;
   transform: translateY(-1px);
+}
+/* Primary Plain 按钮：默认透明底蓝字蓝边，hover 才翻转 */
+.el-button--primary.is-plain {
+  background: var(--accent-soft) !important;
+  border-color: rgba(10, 132, 255, 0.5) !important;
+  color: var(--accent) !important;
+}
+.el-button--primary.is-plain:hover,
+.el-button--primary.is-plain:focus {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: #fff !important;
+}
+/* Danger Plain：同样的规则，避免重置按钮出现类似问题 */
+.el-button--danger.is-plain {
+  background: var(--down-soft) !important;
+  border-color: rgba(255, 69, 58, 0.5) !important;
+  color: var(--down) !important;
+}
+.el-button--danger.is-plain:hover,
+.el-button--danger.is-plain:focus {
+  background: var(--down) !important;
+  border-color: var(--down) !important;
+  color: #fff !important;
+}
+/* Success Plain */
+.el-button--success.is-plain {
+  background: var(--up-soft) !important;
+  border-color: rgba(48, 209, 88, 0.5) !important;
+  color: var(--up) !important;
+}
+.el-button--success.is-plain:hover,
+.el-button--success.is-plain:focus {
+  background: var(--up) !important;
+  border-color: var(--up) !important;
+  color: #fff !important;
 }
 .el-button--small { border-radius: 8px !important; }
 .el-button--large { border-radius: 12px !important; }
