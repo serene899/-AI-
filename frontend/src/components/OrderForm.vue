@@ -289,20 +289,21 @@ const percents = [0.25, 0.5, 0.75, 1]
   padding: 10px 0;
   font-weight: 600;
   font-size: 15px;
+  letter-spacing: -0.01em;
 }
-/* 买入选中 —— 绿 */
+/* 买入选中 —— Apple 绿 */
 .side-switch :deep(.el-radio-button:first-child .el-radio-button__original-radio:checked + .el-radio-button__inner) {
-  background: var(--up);
-  border-color: var(--up);
-  box-shadow: -1px 0 0 0 var(--up);
-  color: #0b0e14;
+  background: var(--up) !important;
+  border-color: var(--up) !important;
+  box-shadow: -1px 0 0 0 var(--up) !important;
+  color: #fff !important;
 }
-/* 卖出选中 —— 红 */
+/* 卖出选中 —— Apple 红 */
 .side-switch :deep(.el-radio-button:last-child .el-radio-button__original-radio:checked + .el-radio-button__inner) {
-  background: var(--down);
-  border-color: var(--down);
-  box-shadow: -1px 0 0 0 var(--down);
-  color: #0b0e14;
+  background: var(--down) !important;
+  border-color: var(--down) !important;
+  box-shadow: -1px 0 0 0 var(--down) !important;
+  color: #fff !important;
 }
 
 .amount-label {
@@ -326,19 +327,26 @@ const percents = [0.25, 0.5, 0.75, 1]
   color: var(--accent);
   font-size: 10px;
   border: 1px solid var(--accent);
-  border-radius: 3px;
-  padding: 0 4px;
+  border-radius: 4px;
+  padding: 1px 5px;
   margin-left: 6px;
   opacity: 0.85;
   white-space: nowrap;
 }
 
 .convert-hint {
-  margin-top: 6px;
+  margin-top: 8px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 10px;
   font-size: 12px;
   color: var(--text-sub);
+  line-height: 1.7;
 }
-.convert-hint b { color: var(--accent); font-family: 'JetBrains Mono', monospace; }
+.convert-hint b {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
 .convert-hint b.accent-strong {
   color: var(--up);
   font-size: 14px;
@@ -349,7 +357,7 @@ const percents = [0.25, 0.5, 0.75, 1]
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 8px;
-  margin: 6px 0 16px;
+  margin: 10px 0 16px;
 }
 .pct-btn {
   width: 100% !important;
@@ -361,6 +369,7 @@ const percents = [0.25, 0.5, 0.75, 1]
   height: 44px;
   font-size: 15px;
   font-weight: 600;
-  letter-spacing: 1px;
+  letter-spacing: -0.01em;
+  border-radius: 12px !important;
 }
 </style>
